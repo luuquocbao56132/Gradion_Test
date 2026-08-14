@@ -20,7 +20,15 @@ Every task's requirements implicitly include this section.
 
 **Hard product caps (assessment §03).** At most **2 characters**, at most **1 chapter**. Enforced server-side in three independent layers (spec §7.4): the prompt asks for at most that many; the response schema sets `maxItems`; the generation loop iterates at most that many rows *regardless of how many rows exist*. **No silent slicing anywhere** — a response with more items than the cap is `INVALID_OUTPUT`, not a truncated success.
 
-**No automatic Gemini retries (assessment §4.3).** `google-genai` retries **5 times by default** (`HttpRetryOptions.attempts`: *"If not specified, default to 5"*; 0 or 1 means no retries). The real client is therefore constructed with `HttpRetryOptions(attempts=1)`. There is no retry loop anywhere in application code. **The only path that re-invokes Gemini is a user `POST`.**
+**No automatic Gemini retries (assessment §4.3).** `attempts` counts the **original request**, so `attempts=1` is "call once, never repeat" — `google-genai` implements it as `tenacity.stop_after_attempt(1)`, which its own source names the *"never retry"* strategy. Verified against `_api_client.py` in the installed SDK 2.18.0:
+
+| Configuration | Actual attempts |
+|---|---|
+| `genai.Client(api_key=…)` — no `retry_options` | 1 |
+| `HttpRetryOptions()` — object present, `attempts` unset | **5** (`_RETRY_ATTEMPTS = 5  # including the initial call`) |
+| `HttpRetryOptions(attempts=1)` — ours, and notebook cell 12 | 1 |
+
+The real client is therefore constructed with `HttpRetryOptions(attempts=1)`, and Task 34 asserts the **resulting attempt count** rather than the value passed in, because the field name reads like a retry count when it is really a total. The 5 matters because we need an `HttpRetryOptions` for the timeout anyway, and it appears the moment that object exists. There is no retry loop anywhere in application code. **The only path that re-invokes Gemini is a user `POST`.**
 
 **Book sent once (assessment §4.3).** In normal operation the book is uploaded and sent to Gemini exactly once, in step 1. Steps 2–5 reach it through the interaction chain. The single exception is provider-side context expiry, where a user-triggered retry of step 2 or 4 re-uploads it (spec §7.6).
 
@@ -673,7 +681,8 @@ Gradion intern take-home. FastAPI + React app that runs the Gemini pipeline from
 
 ## Non-negotiables
 - Max 2 characters, max 1 chapter, enforced server-side. Never slice silently.
-- No automatic Gemini retries. HttpRetryOptions(attempts=1). The SDK default is 5.
+- No automatic Gemini retries. HttpRetryOptions(attempts=1) - `attempts` counts the
+  original call, so 1 means never retry. Inside an HttpRetryOptions it defaults to 5.
 - The book reaches Gemini once, in step 1. Exception: context-expiry recovery for steps 2/4.
 - Single uvicorn worker. No Redis, no broker, no queue, no worker process, no polling, no JWT.
 - The frontend owns no pipeline state and never advances it optimistically.
@@ -8908,17 +8917,46 @@ def make(settings, response):
     return RealGeminiClient(settings, client=stub), stub
 
 
-def test_the_client_disables_sdk_retries():
-    """google-genai retries 5 times by default. Assessment 4.3 forbids that, so
-    the override is deliberate and asserted."""
+def _settings_for_client_config():
     from app.config import Settings
-    settings = Settings(gemini_api_key="k", text_model="t", image_model="i",
-                        data_dir=Path("."), db_path=Path("./x.db"),
-                        use_fake_gemini=False, server_run_id="r",
-                        request_timeout_seconds=12.0)
-    options = RealGeminiClient.http_options(settings)
+    return Settings(gemini_api_key="k", text_model="t", image_model="i",
+                    data_dir=Path("."), db_path=Path("./x.db"),
+                    use_fake_gemini=False, server_run_id="r",
+                    request_timeout_seconds=12.0)
+
+
+def test_the_client_makes_exactly_one_attempt_per_request():
+    """Asserts the attempt count the SDK actually computes, not the value we
+    passed in - `attempts` counts the original request, so the field name reads
+    like a retry count when it is really a total. Assessment 4.3 forbids
+    auto-retry, and one attempt is how the SDK spells that."""
+    from google import genai
+
+    client = genai.Client(
+        api_key="k",
+        http_options=RealGeminiClient.http_options(_settings_for_client_config()),
+    )
+
+    assert client._api_client._retry.stop.max_attempt_number == 1
+
+
+def test_omitting_attempts_would_silently_enable_four_retries():
+    """The footgun this configuration exists to avoid. We need an
+    HttpRetryOptions for the timeout anyway, and `attempts` defaults to 5 the
+    moment that object exists - which is exactly the shape of notebook cell 12."""
+    from google import genai
+    from google.genai import types
+
+    careless = genai.Client(api_key="k", http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(initial_delay=2.0)))
+
+    assert careless._api_client._retry.stop.max_attempt_number == 5
+
+
+def test_the_request_timeout_is_passed_in_milliseconds():
+    options = RealGeminiClient.http_options(_settings_for_client_config())
+    assert options.timeout == 12_000
     assert options.retry_options.attempts == 1
-    assert options.timeout == 12_000            # milliseconds
 
 
 async def test_create_text_sends_a_plain_prompt_and_reads_output_text(settings):
@@ -9079,9 +9117,11 @@ class RealGeminiClient:
 
     @staticmethod
     def http_options(settings: Settings) -> types.HttpOptions:
-        """attempts=1 means no retries. The SDK default is 5, and assessment 4.3
-        forbids auto-retrying a Gemini call - so this is a deliberate override of
-        the SDK's behaviour, not an inherited setting (design 2, 7.7)."""
+        """`attempts` counts the original request, so 1 means call once and never
+        repeat - the SDK compiles it to tenacity.stop_after_attempt(1), its own
+        "never retry" strategy. Setting it explicitly matters because we need an
+        HttpRetryOptions for the timeout anyway, and `attempts` defaults to 5
+        inside one. Assessment 4.3 forbids auto-retry (design 2, 7.7)."""
         return types.HttpOptions(
             timeout=int(settings.request_timeout_seconds * 1000),
             retry_options=types.HttpRetryOptions(attempts=1),
@@ -9221,10 +9261,13 @@ git commit -m "Add the real Gemini client behind the existing protocol
 A leaf swap: every orchestration guarantee was already proven against the fake,
 so this module only has to shape requests and read responses correctly.
 
-Retries are disabled explicitly. google-genai's HttpRetryOptions.attempts
-defaults to 5, so automatic retry is what you get by not deciding - and
-assessment 4.3 forbids it. attempts=1 is documented by the SDK as no retries,
-and a test asserts it rather than trusting a comment.
+Retries are disabled explicitly. `attempts` counts the original request, so 1
+means call once and never repeat. It is set explicitly because we need an
+HttpRetryOptions for the timeout anyway, and `attempts` defaults to 5 inside
+one - which is exactly the shape of notebook cell 12, where dropping that single
+field would silently buy four automatic retries. The test asserts the attempt
+count the SDK actually computes, and a second test pins the 5 so the footgun is
+documented rather than remembered.
 
 Text and image extraction try output_text/output_image first and fall back to
 walking steps, because the notebook itself uses both accessors.
@@ -9441,7 +9484,7 @@ Then **at least three genuine AI overrides** (§2.3), drawn from what actually h
 - **The unnecessary attempt/fencing guard** — a mechanism introduced and justified by a hypothetical; removed once the reachable scenarios were enumerated and every one turned out to be already covered.
 - **Eager automatic context rehydration** — an in-run context rebuild that would have re-invoked Gemini automatically, contradicting "retries are user-triggered only". Removing it collapsed a recovery subsystem into a branch each step already had.
 - **The exactly-once overclaim** — the no-duplicate-calls guarantee was written without its crash boundary, claiming more than an external API can give.
-- **The false claim about the notebook's retry configuration** — the design argued no-auto-retry "matches the notebook" and was therefore not an override at all. Checking the SDK showed `google-genai` retries **5 times by default**, and `note.md` showed the `attempts=1` in the committed notebook was my own edit while running it. The design was citing my own change back at me as independent justification.
+- **The false claim about the notebook's retry configuration — and the over-correction that followed it.** The design argued no-auto-retry "matches the notebook" and was therefore not an override at all; `note.md` shows the `attempts=1` in the committed notebook was my own edit while running it, so the design was citing my own change back at me as independent justification. The first fix then over-corrected, claiming the SDK "retries 5 times by default" — which reads as *any* client silently retrying. Reading `_api_client.py` showed that is false: with no `retry_options` the SDK uses its `stop_after_attempt(1)` *"never retry"* strategy, and the 5 only applies **inside** an `HttpRetryOptions` with `attempts` unset. Worth writing up as one entry with two layers: a claim I could not source, and a correction I also did not source until asked a direct question about it.
 - **The invented fourth status pill** — a *Needs attention* pill replacing §4.4's named vocabulary in the one place the assessment is explicit about wording.
 - **"Idempotent" step handlers** — described as idempotent when they are only resume-aware, contradicting the crash boundary the same document had just drawn.
 - **Invented input limits** — a 2 MB book-text cap and a 500-character style cap, tied to nothing.

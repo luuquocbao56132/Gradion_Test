@@ -47,7 +47,7 @@ Contradictions found while reading the three sources, and how each is resolved:
 | 2 | `app-demo.html:700` renders the book-text panel **only when `p.style` is falsy**, so the book becomes unreachable once step 1 completes — the sole call site of `openBookModal` disappears with it. §4.4 requires the book "readable in full, at any point in the pipeline". | The book gets its own permanent panel, independent of style. The demo's behaviour is a bug and is not reproduced. |
 | 3 | Notebook section 5 contains two variants: cells 37–38 (image-chain chaining, the required path) and cells 39–44, labelled *"Bonus: going further with more granular control"* (explicit reference images, `system_instruction`, no chaining). | Chaining is the normal path. The reference-image variant is the standalone-reconstruction path used when a chain is unusable (§7.5). |
 | 4 | Assessment §03 calls the 2-character / 1-chapter caps "hard requirements"; §08 offers "more characters or chapters — still bounded, and document the changed caps" as a bonus. | §03 is binding for this submission. Changed caps are intentionally out of scope, not forbidden. |
-| 5 | Assessment §4.3 forbids auto-retrying a Gemini call. `google-genai` **retries automatically by default** — `HttpRetryOptions.attempts` documents *"Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5."* So the SDK's out-of-the-box behaviour violates §4.3. Our committed notebook copy does carry `HttpRetryOptions(attempts=1, …)` at cell 12 — but that value is **our own adaptation made while running the notebook** (`note.md`: *"Chỉnh config khi integrate notebook: … disable automatic retry"*), not the reference pipeline's native configuration. | **A deliberate override, stated as one.** Follow the notebook for pipeline mechanics; override its client configuration for retries. The production client is constructed with `HttpRetryOptions(attempts=1)` because §4.3 requires it. The notebook is explicitly *not* cited as justification: it cannot justify a setting we put there ourselves. |
+| 5 | Assessment §4.3 forbids auto-retrying a Gemini call. **`attempts` counts the original request**, so `attempts=1` *is* "no retries" — `google-genai` implements it as `tenacity.stop_after_attempt(1)`, which its own source calls the *"never retry"* strategy. The trap is one level in: a client constructed with no `retry_options` does not retry, but **the moment an `HttpRetryOptions` object exists for any reason — a delay, a status-code list — `attempts` silently defaults to 5** (`_RETRY_ATTEMPTS = 5  # including the initial call`). Notebook cell 12 is exactly that shape: it sets `initial_delay`, `max_delay` and `http_status_codes`, so its `attempts=1` is load-bearing — drop that one field and four automatic retries appear. And that `attempts=1` is **our own adaptation made while running the notebook** (`note.md`: *"Chỉnh config khi integrate notebook: … disable automatic retry"*), not the reference pipeline's native configuration. | **A deliberate override, stated as one.** Follow the notebook for pipeline mechanics; own the retry configuration ourselves. The production client is constructed with `HttpRetryOptions(attempts=1)` because §4.3 requires it, and a test asserts the resulting attempt count rather than trusting the field name. The notebook is explicitly *not* cited as justification: it cannot justify a setting we put there ourselves. |
 
 **Provider facts the design depends on** (verified against the Gemini docs):
 
@@ -605,12 +605,18 @@ spike (§14 step 2) determines which is populated for a structured response; the
 client then uses one accessor everywhere, with the other as a documented
 fallback.
 
-**Retries are disabled deliberately, as an override.** `google-genai` retries
-automatically unless told not to — `attempts` defaults to 5, and 0 or 1 means
-no retries. The client is therefore constructed with
-`HttpRetryOptions(attempts=1)` plus a per-request timeout, because §4.3 forbids
-auto-retry loops (§2, contradiction 5). There is no retry loop anywhere in our
-code. **The only path that re-invokes Gemini is a user `POST`.**
+**Retries are disabled deliberately, as an override.** `attempts` counts the
+original request, so `attempts=1` means the call is made once and never
+repeated. We need a `HttpRetryOptions` object anyway — and within one,
+`attempts` defaults to **5** (one call plus four retries) when left unset. The
+client is therefore constructed with `HttpRetryOptions(attempts=1)` plus a
+per-request timeout, because §4.3 forbids auto-retry loops (§2, contradiction
+5). There is no retry loop anywhere in our code. **The only path that re-invokes
+Gemini is a user `POST`.**
+
+Because the field name reads like a retry count when it is really a total, the
+test asserts the **resulting attempt count** the SDK computes, not the value we
+passed in.
 
 `service_tier` is a notebook parameter serving its paid sections; the app omits
 it and takes the SDK default. The spike confirms this on a free-tier key.
@@ -1207,12 +1213,18 @@ it would be the manufactured evidence §2.3 penalizes. The real ones:
   dependency-free while building a project DTO.
 - **The false claim about the notebook's retry configuration** — the design
   argued that no-auto-retry "matches the notebook" and was therefore not an
-  override at all. Two checks broke it: `google-genai` retries **5 times by
-  default** (`HttpRetryOptions.attempts`: *"If not specified, default to 5"*),
-  and `note.md` shows the `attempts=1` in our notebook copy is our own edit made
-  while running it. The design was citing our own change back at us as
-  independent justification. Rewritten as what it is — a deliberate override
-  required by §4.3.
+  override at all. `note.md` shows the `attempts=1` in our notebook copy is our
+  own edit made while running it, so the design was citing our own change back
+  at us as independent justification. Rewritten as what it is: a deliberate
+  override required by §4.3. **This entry has a second layer worth writing up.**
+  The first correction over-corrected — it claimed the SDK "retries 5 times by
+  default", which reads as *any* `google-genai` client silently retrying. Going
+  to the source showed that is not true: with no `retry_options` the SDK uses
+  its `tenacity.stop_after_attempt(1)` *"never retry"* strategy. The 5 only
+  applies **inside** an `HttpRetryOptions` object with `attempts` unset — which
+  is precisely the notebook's shape, since it sets delays and status codes. Both
+  the original claim and its first fix were plausible-sounding and unverified;
+  only reading `_api_client.py` settled it.
 - **The invented fourth status pill** — a *Needs attention* pill was added for
   failed and interrupted projects, replacing §4.4's named vocabulary in the one
   place the assessment is explicit about wording. The real concern was kept as a
