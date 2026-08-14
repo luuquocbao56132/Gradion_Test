@@ -1,225 +1,279 @@
 # Gemini `interactions` contract — spike findings
 
-Spike run: 2026-08-14, single execution, `backend/spike_gemini.py` (deleted after this
-document was written), against the real Gemini API using the key in the worktree's
-`.env`. `google-genai` 2.18.1, models `gemini-3.1-flash-lite` (text) and
-`gemini-2.5-flash-image` (image) — both confirmed present via `client.models.list()`
-before this spike ran.
+Spike run: 2026-08-14 (fix round 1 — see history for the aborted first run),
+`backend/spike_gemini.py` (deleted after this document was written), against the real
+Gemini API using the key in the worktree's `.env`. `google-genai` 2.18.1, models
+`gemini-3.1-flash-lite` (text) and `gemini-2.5-flash-image` (image) — both confirmed
+present via `client.models.list()`.
 
-**Headline result: the spike did not complete.** The very first `interactions.create`
-call raised `PermissionDeniedError` (HTTP 403) and the script has no try/except around
-that call, so execution stopped there. Only Q5 has any live data (partial — the file
-upload half succeeded, the interaction-create half failed). Q1–Q4 and Q6–Q9 were never
-attempted. Per the task's cost-discipline rule, the spike was **not** retried, no
-alternate model was substituted, and no second live call was made to narrow down the
-cause. What follows records exactly what was observed, and — where source inspection of
-the installed SDK (no API calls involved) gives useful, clearly-labelled context — what
-that inspection suggests for later verification.
+**Headline: the `interactions` endpoint works.** The first run (superseded) aborted on
+its very first call and wrongly concluded the endpoint might be access-gated. It was
+not. This run wraps every probe (Q1–Q9) in its own try/except with up to 3 attempts,
+retrying only on a 403, and got a clean, complete answer to all nine questions. The 403s
+turned out to be a known intermittent provider flake, not a contract question — see
+below.
+
+**This per-probe retry is a spike-only diagnostic, used to characterise a known flake.
+It is not, and must not become, a pattern in production code. Assessment §4.3 forbids
+automatic retries absolutely; a transient `403` in production surfaces as
+`GEMINI_ERROR` → step `FAILED` → user-triggered Retry, which is the recovery path the
+design already specifies.**
+
+## Intermittent-403 finding (first-class result)
+
+Across the 11 API calls this run made (file upload excluded — it uses a different,
+non-`interactions` code path and never 403'd), **4 raised `PermissionDeniedError` (403,
+`permission_denied`) — a 36.4% rate** — and every single one succeeded when the
+*identical* request was retried immediately after:
+
+- `Q5 seed (text+document)`: attempt 1 → 403, attempt 2 → 403, attempt 3 → OK
+- `Q1/Q2/Q6 style (chained)`: attempt 1 → 403, attempt 2 → OK
+- `Q3/Q7 structured`: attempt 1 → 403, attempt 2 → OK
+- `Q4 image`, `Q8 standalone image`, `Q9`: all OK/answered on attempt 1, no 403 seen for
+  these three in this run (small sample — not evidence the flake is text-only)
+
+This matches the coordinator's independent diagnostic (six identical bare-document
+calls → `403, 403, OK, OK, OK, OK`). The failure is **non-deterministic, has no
+warm-up pattern, and is unrelated to payload shape or content type** — it hit a
+document-input call, a plain chained call, and a structured-output call alike, and
+resolved on retry every time with no other change. Nothing about the first run's
+specific failure was special; it was simply the unlucky first sample of this same
+flake.
 
 ## Raw output
 
 ```
-Q5 upload uri: https://generativelanguage.googleapis.com/v1beta/files/w31srpotqz4p
-Traceback (most recent call last):
-  File ".../google/genai/_gaos/interactions.py", line 2111, in create
-    return await _speakeasy_parse_response(http_res)
-  File ".../google/genai/_gaos/interactions.py", line 1887, in _speakeasy_parse_response
-    raise errors.CreateInteractionClientError(
-        response_data, http_res, http_res_text
-    )
-google.genai._gaos.errors.createinteraction.CreateInteractionClientError: The caller does not have permission
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "backend/spike_gemini.py", line 103, in <module>
-    asyncio.run(main())
-  ...
-  File "backend/spike_gemini.py", line 25, in main
-    seed = await client.aio.interactions.create(
-  File ".../google/genai/_gaos/google_genai.py", line 427, in create
-    response = await async_wrap_sdk_call(...)
-  File ".../google/genai/_gaos/lib/compat_errors.py", line 378, in async_wrap_sdk_call
-    return await fn(*args, **kwargs)
-  File ".../google/genai/_gaos/interactions.py", line 2113, in create
-    await response_helpers.raise_parse_error_async(...)
-  File ".../google/genai/_gaos/utils/response_helpers.py", line 110, in raise_parse_error_async
-    raise parse_error from exc
-google.genai._gaos.lib.compat_errors.PermissionDeniedError: Error code: 403 - {'error': {'message': 'The caller does not have permission', 'code': 'permission_denied'}}
+Q5 upload uri: https://generativelanguage.googleapis.com/v1beta/files/9a8xaiwsdv7v
+Q5 seed (text+document): attempt 1/3 raised google.genai._gaos.lib.compat_errors.PermissionDeniedError (status_code=403): Error code: 403 - {'error': {'message': 'The caller does not have permission', 'code': 'permission_denied'}}
+Q5 seed (text+document): attempt 2/3 raised google.genai._gaos.lib.compat_errors.PermissionDeniedError (status_code=403): Error code: 403 - {'error': {'message': 'The caller does not have permission', 'code': 'permission_denied'}}
+Q5 seed (text+document): attempt 3/3 OK
+Q5 multipart+document accepted. id: v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXd0NOX2FzUElOOERtb3NVUDJieUwtUTQ
+Q5 name-form uri: attempt 1/3 raised google.genai._gaos.lib.compat_errors.BadRequestError (status_code=400): Error code: 400 - {'error': {'message': 'Unsupported file URI type: files/9a8xaiwsdv7v. File URI must be a File API (e.g. https://generativelanguage.googleapis.com/files/<id>), Youtube (e.g. https://w
+Q5 name-form uri REJECTED: google.genai._gaos.lib.compat_errors.BadRequestError | Error code: 400 - {'error': {'message': 'Unsupported file URI type: files/9a8xaiwsdv7v. File URI must be a File API (e.g. https://generativelanguage.googleapis.com/files/<id>), Youtube (e.g. https://w
+Q1/Q2/Q6 style (chained): attempt 1/3 raised google.genai._gaos.lib.compat_errors.PermissionDeniedError (status_code=403): Error code: 403 - {'error': {'message': 'The caller does not have permission', 'code': 'permission_denied'}}
+Q1/Q2/Q6 style (chained): attempt 2/3 OK
+Q1 output_text populated: True
+Q1 output_text: 'Oil painting in the style of Beatrix Potter.'
+Q2 steps[-1].content[0].text: 'Oil painting in the style of Beatrix Potter.'
+Q6 chaining accepted, id: v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXeHlOX2F2emxGWmFSdnIwUHk2YlAtUTQ
+Q3/Q7 structured: attempt 1/3 raised google.genai._gaos.lib.compat_errors.PermissionDeniedError (status_code=403): Error code: 403 - {'error': {'message': 'The caller does not have permission', 'code': 'permission_denied'}}
+Q3/Q7 structured: attempt 2/3 OK
+Q3 structured output_text populated: True
+Q7 asked for <= 2, returned 2 items
+Q7 raw items: [{"name": "Toad", "prompt": "An anthropomorphic, eccentric toad wearing a jaunty tweed driving cap and a silk scarf, sitting behind the wheel of a vintage brass-trimmed 1900s motor-car, expressive and grandiose face, oil painting style in the vein of Beatrix Potter."}, {"name": "Rat", "prompt": "An ...
+Q4 image: attempt 1/3 OK
+Q4a output_image is not None: True
+Q4a mime_type: image/png | decoded bytes: 2014478
+Q4b steps-walk found an image: True
+Q8 standalone image: attempt 1/3 OK
+Q8 standalone image+system_instruction accepted: v1_Chc3aU5fYXB6X0JfSy12cjBQamJ1ZDZRcxIXN2lOX2Fwel9CX0stdnIwUGpidWQ2UXM
+Q9 unknown previous_interaction_id: attempt 1/3 raised google.genai._gaos.lib.compat_errors.BadRequestError (status_code=400): Error code: 400 - {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}
+Q9 raises: google.genai._gaos.lib.compat_errors.BadRequestError
+Q9 message: Error code: 400 - {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}
+Q9 code attrs: None 400
+Q9 body: {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}
+SUMMARY: 11 total attempts across all probes, 4 were 403 permission_denied (36.4%)
 ```
 
-Exit code: 1. No other stdout lines were produced.
+Exit code: 0. All nine questions answered.
 
 ## Q1 — Is `interaction.output_text` populated for a plain text call?
 
-**NOT ANSWERED.** The script never reached this call (line 48, the `style` interaction);
-execution stopped at line 25. The dispatcher's pre-flight note said this was already
-known to be `True` from an earlier manual check, but that check is not reproduced in
-this document because it isn't something this spike itself observed — no pasted output
-line exists for it here.
+**Yes, confirmed.** `style.output_text` (a chained call, `previous_interaction_id`
+set) was truthy and held the actual model response:
+
+`Q1 output_text populated: True`
+`Q1 output_text: 'Oil painting in the style of Beatrix Potter.'`
 
 ## Q2 — Does `steps[-1].content[0].text` return the same string as `output_text`?
 
-**NOT ANSWERED.** Blocked for the same reason as Q1.
+**Yes, confirmed — identical string.**
+
+`Q2 steps[-1].content[0].text: 'Oil painting in the style of Beatrix Potter.'`
 
 ## Q3 — Is `output_text` populated when `response_format` is set (structured output)?
 
-**NOT ANSWERED.** The `structured` call (line 56) was never reached.
+**Yes, confirmed.**
+
+`Q3 structured output_text populated: True`
+
+`structured.output_text` held the raw JSON string; `json.loads()` on it succeeded
+directly (see Q7 for the parsed content).
 
 ## Q4 — Does `output_image` carry base64 `data` + `mime_type`, and does the steps-walk find the same image?
 
-**NOT ANSWERED.** The image call (line 79) was never reached.
+**Yes to both, confirmed.**
+
+`Q4a output_image is not None: True`
+`Q4a mime_type: image/png | decoded bytes: 2014478`
+`Q4b steps-walk found an image: True`
+
+`img.output_image.mime_type` is `image/png`; `img.output_image.data` is a base64
+string that decodes to ~2 MB of real PNG bytes. The `steps`-walk fallback
+(`for step in reversed(img.steps): if step.type == "model_output": ...`) independently
+locates a `content.type == "image"` entry too — both accessors agree an image is
+present.
 
 ## Q5 — Is `[text, document]` input with a `files.upload` URI accepted?
 
-**PARTIALLY ANSWERED — the upload succeeded, the interaction using it did not.**
+**Yes, confirmed — the notebook's mechanic works.** `files.upload()` → the full
+`https://generativelanguage.googleapis.com/v1beta/files/<id>` URI → a
+`{"type": "document", "uri": <that URI>}` content part in `interactions.create` is
+accepted and read correctly (the model's later structured-output answer, Q7, correctly
+named "Toad" and "Rat" — characters from the uploaded book text, confirming the
+document was actually read, not just accepted-and-ignored).
 
-- `client.files.upload(file="spike_book.txt")` succeeded synchronously and returned a
-  usable URI:
-  `Q5 upload uri: https://generativelanguage.googleapis.com/v1beta/files/w31srpotqz4p`
-- The very next call, `client.aio.interactions.create(model=TEXT, input=[{"type":
-  "text", ...}, {"type": "document", "uri": book.uri}])`, raised before returning:
-  `google.genai._gaos.lib.compat_errors.PermissionDeniedError: Error code: 403 -
-  {'error': {'message': 'The caller does not have permission', 'code':
-  'permission_denied'}}`
+`Q5 upload uri: https://generativelanguage.googleapis.com/v1beta/files/9a8xaiwsdv7v`
+`Q5 multipart+document accepted. id: v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXd0NOX2FzUElOOERtb3NVUDJieUwtUTQ`
 
-Because this was the **first and only** `interactions.create` call this spike managed to
-issue, the failure cannot be attributed specifically to the `document` content part —
-it is equally consistent with the entire `interactions.create` endpoint being
-unavailable to this API key/project regardless of payload shape. Distinguishing those
-two explanations (endpoint-wide gate vs. document-part-specific rejection) requires one
-more live call (e.g. a text-only `interactions.create`), which this spike does not make
-per the "run once, do not retry" rule.
+The first attempt at this exact call 403'd twice before succeeding on attempt 3/3 —
+see the intermittent-403 finding above; this is the flake, not a contract answer.
 
-**Working hypothesis (unverified):** `interactions`/GAOS (the SDK module is literally
-named `_gaos`) appears to be a distinct, newer surface from the classic
-`generateContent`/`models.list` surface this key was already confirmed to work against.
-A 403 with `code: permission_denied` on the first possible call to that surface is
-consistent with the interactions API not being enabled/allowlisted for this key's
-project, independent of model choice — `gemini-3.1-flash-lite` was already confirmed to
-exist in this account's `models.list()` output, so this is not a wrong-model-ID problem.
+**Sub-finding — URI form matters.** The **name-form** URI (`files/9a8xaiwsdv7v`, what
+`file.name` returns) is **rejected with 400**, not accepted:
+
+`Q5 name-form uri: attempt 1/3 raised ... BadRequestError (status_code=400): Error code: 400 - {'error': {'message': 'Unsupported file URI type: files/9a8xaiwsdv7v. File URI must be a File API (e.g. https://generativelanguage.googleapis.com/files/<id>), ...`
+
+The **full `https://...` URI** (`file.uri`, not `file.name`) is required. `mime_type`
+on the document part makes no observable difference either way (per the coordinator's
+independent diagnostic — not separately re-tested in this run to conserve calls).
 
 ## Q6 — Is `previous_interaction_id` accepted, and does it chain?
 
-**NOT ANSWERED.** The `style` call that would have exercised chaining (line 48) was
-never reached; `seed.id` was never obtained.
+**Yes, confirmed.** The `style` call passed `previous_interaction_id=seed.id` and
+succeeded, returning its own new `id`:
+
+`Q6 chaining accepted, id: v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXeHlOX2F2emxGWmFSdnIwUHk2YlAtUTQ`
+
+That the style answer ("Oil painting in the style of Beatrix Potter") is a sensible
+continuation of the seed turn ("here's a book, don't say anything yet") is consistent
+with real context-chaining, not just an accepted-but-ignored parameter.
 
 ## Q7 — Is `maxItems` honoured, or advisory?
 
-**NOT ANSWERED.** The structured-output call (line 56) was never reached, so no item
-count was ever observed. Do not read the Decisions entry below as an empirical finding —
-it is a defensive default carried over unverified from spec §7.4's existing assumption,
-not something this spike measured.
+**Observed: the model returned exactly 2 items for `maxItems: 2` — it did not exceed
+the cap in this run.**
+
+`Q7 asked for <= 2, returned 2 items`
+
+This single non-violating observation does **not** prove `maxItems` is a hard,
+server-enforced constraint — it's equally consistent with the model simply choosing to
+stop at 2 on its own (there were plausibly more than 2 "adult characters" available in
+the seeded snippet, but the snippet was short and repetitive, so this isn't a strong
+stress test of the cap). No overflow was observed, but none was forced either.
+**Decision unchanged from spec §7.4's existing assumption: the generation-loop bound
+and strict `len(items) > cap` validation are the only real enforcement** — this run
+gives no reason to relax that, and every reason to keep it, since a single
+non-violating sample cannot establish server-side guarantees either way.
 
 ## Q8 — Is a standalone image call with inline `image` parts + `system_instruction` accepted?
 
-**NOT ANSWERED.** The `img` call it depends on (line 79) was never reached.
+**Yes, confirmed.**
+
+`Q8 standalone image+system_instruction accepted: v1_Chc3aU5fYXB6X0JfSy12cjBQamJ1ZDZRcxIXN2lOX2Fwel9CX0stdnIwUGpidWQ2UXM`
+
+Inline `{"type": "image", "data": <base64>, "mime_type": "image/png"}` plus a top-level
+`system_instruction` string, with no `previous_interaction_id`, is accepted by the
+image model on the first attempt (no 403 seen for this probe in this run).
 
 ## Q9 — What exception type/message does an unknown `previous_interaction_id` raise?
 
-**NOT ANSWERED live** — the try/except block at the end of the script (line 107) was
-never reached because the script raised, unhandled, at line 25.
+**Observed live — and it is NOT what the first run's static-analysis inference
+predicted.** Calling with `previous_interaction_id="interactions/does-not-exist"`
+(the brief's literal string) raised, on the first attempt (no 403, so no retry
+triggered):
 
-However, the Q5 failure is directly useful here because it exercises the exact same
-error-translation path `InteractionNotFound` detection would rely on, and confirms that
-path is real and active at runtime. Static inspection of the installed package (no
-further API calls — this is reading local `.venv` source, not hitting the network)
-shows `google/genai/_gaos/lib/compat_errors.py` maps HTTP status codes to exception
-classes via a fixed table:
+`Q9 raises: google.genai._gaos.lib.compat_errors.BadRequestError`
+`Q9 message: Error code: 400 - {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}`
+`Q9 code attrs: None 400`
+`Q9 body: {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}`
 
-```python
-_STATUS_MAP = {
-    400: BadRequestError,
-    401: AuthenticationError,
-    403: PermissionDeniedError,
-    404: NotFoundError,
-    409: ConflictError,
-    422: UnprocessableEntityError,
-    429: RateLimitError,
-}
-```
+Facts confirmed directly from this exception object:
+- **Class:** `BadRequestError`, **module:** `google.genai._gaos.lib.compat_errors`
+- **`.status_code`: `400`** (an int)
+- **`.code` attribute does not exist** — `getattr(exc, "code", None)` is `None`.
+  There is no `code` field on the exception itself.
+- **`.body`** is a parsed dict: `{"error": {"message": "Request contains an invalid
+  argument.", "code": "invalid_request"}}`. The provider's `code` string
+  (`invalid_request`) lives inside `.body["error"]["code"]`, not as a top-level
+  attribute.
 
-The Q5 failure **observed live** — `PermissionDeniedError` for a 403 — matches this
-table exactly, which gives reasonable (but not certain) confidence that a 404 from an
-unknown `previous_interaction_id` would raise
-`google.genai._gaos.lib.compat_errors.NotFoundError`, in module
-`google.genai._gaos.lib.compat_errors`. From the same source:
-
-- `NotFoundError` (like `PermissionDeniedError`) is an `APIStatusError`, which sets
-  `self.status_code = response.status_code` in `__init__` — so `status_code` would be
-  `404`, populated from a real int, not a string.
-- There is **no `.code` attribute** anywhere in this exception hierarchy. The
-  `getattr(exc, "code", None)` the brief's script probes would return `None` on any of
-  these exceptions. The provider's `code: "..."` string (e.g. `permission_denied`,
-  presumably `not_found` for a 404) lives one level down, inside `exc.body["error"]["code"]`
-  — `.body` is set in `APIError.__init__` to the parsed JSON dict (confirmed live: the
-  Q5 exception's rendered message shows `body` was parsed into
-  `{'error': {'message': ..., 'code': 'permission_denied'}}`, not left as a raw string).
-- `str(exc)` renders as `Error code: {status_code} - {body}` (from
-  `_compose_message`), which is exactly the message format observed live for the Q5
-  403. A 404 would render as `Error code: 404 - {'error': {'message': ..., 'code':
-  'not_found'}}` or similar, by the same code path.
-
-This is **inference from source, not an observed Q9 result**, and must be confirmed
-with a real unknown-`previous_interaction_id` call once the Q5 access blocker is
-resolved, before `InteractionNotFound` detection ships.
+**Important caveat, stated plainly:** this is a `400 invalid_request`, not the `404
+NotFoundError` the first run's source-code inference predicted. The likely reason:
+real interaction IDs observed elsewhere in this same run look like
+`v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXd0NOX2FzUElOOERtb3NVUDJieUwtUTQ` — an opaque
+token in a specific format — while the brief's test string, `"interactions/does-not-exist"`,
+does not match that shape at all. The API appears to validate the *format* of
+`previous_interaction_id` before attempting a lookup, and rejects a malformed id with
+400 `invalid_request` rather than ever reaching "not found" logic. **This spike did not
+test a well-formed-but-nonexistent id** (e.g. a syntactically valid `v1_...` token that
+was never issued, or one that has genuinely expired) — that would require either
+minting a plausible-but-fake token of the right shape, or waiting for a real one to
+expire, neither of which this run attempted. The `_STATUS_MAP` in
+`compat_errors.py` (400→`BadRequestError`, 404→`NotFoundError`, confirmed accurate
+against this run's 400 and the prior run's 403) means a well-formed-but-missing id
+would plausibly still raise `NotFoundError` (404) rather than `BadRequestError` — but
+that is now flagged explicitly as **unverified inference**, not fact, precisely because
+this run proved the naive "just try a nonsense string" approach doesn't exercise that
+path.
 
 ## Decisions
 
-Because 8 of 9 questions were never exercised, most of these are **not** verified
-contract decisions — they are the best available defaults, explicitly flagged as
-unverified, to unblock later tasks' design without pretending this spike confirmed them.
-None of Q1–Q4, Q6–Q8 should be treated as settled; re-run the spike (past the Q5
-blocker) before `RealGeminiClient` ships.
-
-- **Q1/Q2 (`create_text`)** — UNVERIFIED. Provisionally follow the dispatcher's
-  pre-verified note (`output_text` is populated for a plain text call) and use
-  `interaction.output_text` as the primary accessor, with `interaction.steps[-1]
-  .content[0].text` as the documented fallback — but re-confirm both live before
-  `RealGeminiClient.create_text` ships.
-- **Q3 (`create_structured`)** — UNVERIFIED. Provisionally mirror Q1: try
-  `interaction.output_text` first, fall back to `interaction.steps[-1].content[0].text`,
-  same as the brief's script does (`raw = structured.output_text or
-  structured.steps[-1].content[0].text`). Not confirmed.
-- **Q4 (`create_image`)** — UNVERIFIED. Provisionally use `interaction.output_image`
-  (expected shape: `.data` base64 string, `.mime_type` string) as primary, with the
-  brief's steps-walk (`for step in reversed(interaction.steps): if step.type ==
-  "model_output": for content in reversed(step.content): if content.type == "image"`)
-  as the fallback. Not confirmed live.
-- **Q5 (`upload_book`)** — **File upload itself is confirmed working**:
-  `client.files.upload(file=...)` returns a real, usable `.uri`. Whether that URI can
-  actually be consumed by `interactions.create` as a `{"type": "document", "uri":
-  ...}` input part is **not confirmed** — the one attempt failed with a 403 that may or
-  may not be document-specific (see Q5 section above). `RealGeminiClient.upload_book`
-  should not assume the document-input path works until a text-only
-  `interactions.create` call is separately confirmed to succeed against this
-  key/project, and then the document-input call is retried in isolation.
-- **Q6 (chaining via `previous_interaction_id`)** — UNVERIFIED. No chaining call ever
-  executed; `seed.id` was never obtained.
-- **Q7 (`maxItems`)** — UNVERIFIED, no live data. Per spec §7.4's existing assumption,
-  and consistent with how JSON-Schema `maxItems` is generally treated as advisory by
-  LLM structured-output implementations rather than as a hard server-side cap: *the
-  generation-loop bound and strict `len(items) > cap` validation are the only real
-  enforcement.* This is carried forward as a defensive design default, not as something
-  this spike measured — confirm with a live structured-output call before relying on it.
-- **Q8 (standalone image + `system_instruction`)** — UNVERIFIED. No such call executed.
-- **Q9 (`InteractionNotFound` detection)** — UNVERIFIED live, but source-inferred with
-  moderate confidence (see Q9 section): expect
-  `google.genai._gaos.lib.compat_errors.NotFoundError` (module
-  `google.genai._gaos.lib.compat_errors`), `.status_code == 404`, no usable `.code`
-  attribute (always `None` on this hierarchy — do not gate on it), and `.body` as a
-  parsed dict shaped `{"error": {"message": str, "code": str}}`. A reliable predicate,
-  pending live confirmation:
-  `isinstance(exc, google.genai._gaos.lib.compat_errors.NotFoundError)` (or, more
-  defensively, `getattr(exc, "status_code", None) == 404`). Do not wire this into
-  `InteractionNotFound` without first confirming it against a real unknown-id call.
-
-## Overall blocker for Tasks 16, 17, 34
-
-The account/key that passed `models.list()` and basic-model verification does **not**
-appear to have working access to the `interactions` (`_gaos`) surface that this whole
-contract — and therefore `FakeGeminiClient`/`RealGeminiClient`'s entire design — is
-built on: the very first call to it returned `403 permission_denied`. This needs to be
-resolved (correct project/API enablement, correct key, or a different SDK entry point)
-and this spike re-run to completion before Tasks 16, 17, or 34 can rely on anything
-beyond the Q5 file-upload result and the UNVERIFIED defaults above.
+- **`create_text` (Q1/Q2):** use `interaction.output_text` as the primary accessor
+  (confirmed populated and correct). Fall back to `interaction.steps[-1].content[0].text`
+  only defensively — confirmed to return an identical string in this run, but treat
+  `output_text` as authoritative.
+- **`create_structured` (Q3):** use `interaction.output_text`, confirmed populated for a
+  `response_format`-bearing call; `json.loads()` directly on it. Same fallback as above.
+- **`create_image` (Q4):** use `interaction.output_image.data` (base64) +
+  `interaction.output_image.mime_type`, confirmed populated (`image/png`, ~2 MB
+  decoded). Fall back to the steps-walk
+  (`step.type == "model_output"` → `content.type == "image"`) only if `output_image`
+  is `None` — confirmed both accessors agree when `output_image` is present.
+- **`upload_book` (Q5):** `client.files.upload(file=...)` then pass **`file.uri`** (the
+  full `https://generativelanguage.googleapis.com/...` form) as
+  `{"type": "document", "uri": file.uri}` — this is the notebook's mechanic and it
+  **works**, confirmed end-to-end including that the model actually reads the content.
+  **Do not use `file.name`** (the short `files/<id>` form) — confirmed rejected with
+  `400 BadRequestError`, message `"Unsupported file URI type: ..."`.
+- **Chaining (Q6):** pass `previous_interaction_id=<prior interaction>.id` on every
+  follow-up call in a project's turn sequence — confirmed accepted and confirmed to
+  actually carry context forward (the chained answer was contextually appropriate, not
+  just accepted-and-ignored).
+- **`maxItems` cap (Q7):** treat as advisory / not provably server-enforced. Per spec
+  §7.4: **the generation-loop bound and strict `len(items) > cap` validation are the
+  only real enforcement.** This run observed exactly-at-cap, not over-cap, so it neither
+  confirms nor refutes hard enforcement — the defensive validation stays regardless.
+- **Standalone image + system_instruction (Q8):** confirmed accepted — inline
+  `{"type": "image", "data": <base64>, "mime_type": ...}` content parts plus a
+  top-level `system_instruction` string, no `previous_interaction_id` required. This is
+  the shape Step 5's recovery path (redraw-from-reference) should use.
+- **`InteractionNotFound` detection (Q9):** for a **malformed** `previous_interaction_id`
+  (wrong shape, e.g. not the opaque `v1_...` token format the API issues), expect
+  `google.genai._gaos.lib.compat_errors.BadRequestError`
+  (module `google.genai._gaos.lib.compat_errors`), `.status_code == 400`, no `.code`
+  attribute (always `None` — do not gate on it), `.body ==
+  {"error": {"message": "Request contains an invalid argument.", "code":
+  "invalid_request"}}`. **This spike could not exercise the well-formed-but-nonexistent
+  case** (a syntactically valid token that was never issued or has expired) — for that
+  case, fall back to the source-confirmed dispatch table in `compat_errors.py`
+  (`_STATUS_MAP`) and expect `NotFoundError`, `.status_code == 404`, same "no `.code`
+  attribute, `.body` is the parsed error dict" shape, **but treat that specific
+  prediction as unverified** until confirmed against a real expired-interaction call.
+  A defensible `RealGeminiClient` predicate for `InteractionNotFound` that covers both
+  observed and predicted cases:
+  `getattr(exc, "status_code", None) in (400, 404)` combined with a body-content check
+  (`exc.body.get("error", {}).get("code") in ("invalid_request", "not_found")`) rather
+  than relying on exception class alone, since the 400 case is now confirmed real and
+  the 404 case is still only inferred.
+- **Intermittent 403 (new, cross-cutting):** `PermissionDeniedError` (403,
+  `permission_denied`) is a transient provider flake on the `interactions` endpoint,
+  observed at 36.4% (4/11) in this run across text and document-input calls,
+  unrelated to payload shape, resolving on a bare retry of the identical request every
+  time observed. **No automatic retry is added to `RealGeminiClient` or anywhere in
+  production code** — assessment §4.3 forbids it absolutely. In production, a 403 here
+  surfaces as `GEMINI_ERROR`, the affected step moves to `FAILED`, and recovery is the
+  existing user-triggered Retry action — exactly the path the design already
+  specifies. The per-probe retry used in this throwaway spike exists solely to
+  characterise the flake's rate and confirm it's not a real contract answer; it must
+  not be copied into `FakeGeminiClient` or `RealGeminiClient`.
