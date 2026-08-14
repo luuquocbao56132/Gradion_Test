@@ -20,15 +20,18 @@ class SessionCreate(BaseModel):
     name: Annotated[str, Field(min_length=1)]
     email: Annotated[str, Field(min_length=3)]
 
-    @field_validator("name", "email")
+    @field_validator("name")
     @classmethod
-    def _strip(cls, value: str) -> str:
-        return value.strip()
+    def _non_blank_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
 
     @field_validator("email")
     @classmethod
     def _email_shape(cls, value: str) -> str:
-        lowered = value.lower()
+        lowered = value.strip().lower()
         if not EMAIL_RE.match(lowered):
             raise ValueError("must be a valid email address")
         return lowered
