@@ -4,6 +4,7 @@ import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from app.models import EntityView, Failure, ProjectListItem, ProjectView
 from app.steps import (
@@ -274,3 +275,69 @@ def save_illustration(conn, *, project_id: str, chapter_id: str, illustration_pa
     _save_artifact(conn, table="chapters", column="illustration_path", project_id=project_id,
                    row_id=chapter_id, path=illustration_path,
                    image_interaction_id=image_interaction_id)
+
+
+# --------------------------------------------------------------------------
+# Conditional transitions
+# --------------------------------------------------------------------------
+
+def begin_step(conn, project_id: str, *, expected_status: ProjectStatus,
+               server_run_id: str, now: str) -> bool:
+    """One statement, three invariants (design 5.1).
+
+    status  = ...                     enforces step ordering
+    IDLE/FAILED                       enforces at most one execution
+    RUNNING with a foreign run id     performs orphan recovery
+
+    True  -> this caller owns the attempt; start the work.
+    False -> 409 with the current project state.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE projects
+           SET step_state = 'RUNNING', server_run_id = :run, step_started_at = :now,
+               error_code = NULL, error_message = NULL
+         WHERE id = :pid
+           AND status = :expected
+           AND ( step_state IN ('IDLE', 'FAILED')
+                 OR (step_state = 'RUNNING' AND server_run_id IS NOT :run) )
+        """,
+        {"pid": project_id, "expected": str(expected_status), "run": server_run_id, "now": now},
+    )
+    return cursor.rowcount == 1
+
+
+def complete_step(conn, project_id: str, *, server_run_id: str,
+                  next_status: ProjectStatus) -> bool:
+    """status and step_state move together, so they can never disagree."""
+    cursor = conn.execute(
+        """
+        UPDATE projects
+           SET status = :next, step_state = 'IDLE', server_run_id = NULL,
+               step_started_at = NULL, error_code = NULL, error_message = NULL
+         WHERE id = :pid AND step_state = 'RUNNING' AND server_run_id = :run
+        """,
+        {"pid": project_id, "next": str(next_status), "run": server_run_id},
+    )
+    return cursor.rowcount == 1
+
+
+def fail_step(conn, project_id: str, *, server_run_id: str, code: str, message: str,
+              clear_head: Literal["text", "image"] | None = None) -> bool:
+    """Ownership-guarded: a task that no longer owns the run writes nothing, so
+    a late failure or cancellation cannot clobber a newer execution (design 6.3)."""
+    head_sql = ""
+    if clear_head == "text":
+        head_sql = ", text_interaction_id = NULL"
+    elif clear_head == "image":
+        head_sql = ", image_interaction_id = NULL"
+    cursor = conn.execute(
+        f"""
+        UPDATE projects
+           SET step_state = 'FAILED', server_run_id = NULL, step_started_at = NULL,
+               error_code = :code, error_message = :message {head_sql}
+         WHERE id = :pid AND step_state = 'RUNNING' AND server_run_id = :run
+        """,
+        {"pid": project_id, "code": code, "message": message, "run": server_run_id},
+    )
+    return cursor.rowcount == 1
