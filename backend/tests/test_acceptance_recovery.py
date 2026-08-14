@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from app import db, pipeline, store
+from app.gemini import prompts
 from app.gemini.protocol import GeminiError, InteractionNotFound
 
 BOOK = "Chapter 1. The river bank."
@@ -63,16 +64,6 @@ def raw_heads(settings, pid):
             (pid,),
         ).fetchone()
     return row["text_interaction_id"], row["image_interaction_id"]
-
-
-def seed_raw_heads(settings, pid, *, text_head, image_head):
-    with db.get_conn(settings) as conn:
-        conn.execute(
-            "UPDATE projects SET text_interaction_id=?, image_interaction_id=? "
-            "WHERE id=?",
-            (text_head, image_head, pid),
-        )
-    assert raw_heads(settings, pid) == (text_head, image_head)
 
 
 async def yield_and_drain():
@@ -334,54 +325,23 @@ async def test_a_cancellation_arriving_after_takeover_writes_nothing(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("step", "prerequisites", "text_head", "image_head", "expected_status"),
-    [
-        (
-            "CHARACTERS",
-            ["STYLE"],
-            "text-step-2-live",
-            "image-step-2-untouched",
-            "CHARACTERS_GENERATED",
-        ),
-        (
-            "CHAPTERS",
-            ["STYLE", "CHARACTERS", "PORTRAITS"],
-            "text-step-4-live",
-            "image-step-4-untouched",
-            "CHAPTERS_GENERATED",
-        ),
-    ],
-    ids=["step-2-characters", "step-4-chapters"],
-)
-async def test_text_expiry_clears_only_text_and_user_retry_rebuilds_with_book(
-    signed_in,
-    settings,
-    fake_gemini,
-    step,
-    prerequisites,
-    text_head,
-    image_head,
-    expected_status,
+async def test_step_2_text_expiry_rebuilds_from_its_natural_null_image_head(
+    signed_in, settings, fake_gemini
 ):
     pid = await create(signed_in)
-    await advance(signed_in, pid, prerequisites)
-    seed_raw_heads(
-        settings,
-        pid,
-        text_head=text_head,
-        image_head=image_head,
-    )
+    await advance(signed_in, pid, ["STYLE"])
+    text_head, image_head = raw_heads(settings, pid)
+    assert text_head is not None
+    assert image_head is None
     before_failure = len(fake_gemini.calls)
     fake_gemini.fail_on(
         before_failure, InteractionNotFound("interaction expired")
     )
 
-    await run(signed_in, pid, step)
+    await run(signed_in, pid, "CHARACTERS")
     await yield_and_drain()
 
     failed_calls = fake_gemini.calls[before_failure:]
-    assert len(failed_calls) == 1
     assert [call.kind for call in failed_calls] == ["structured"]
     assert failed_calls[0].previous_interaction_id == text_head
     assert failed_calls[0].document_uri is None
@@ -389,10 +349,10 @@ async def test_text_expiry_clears_only_text_and_user_retry_rebuilds_with_book(
     assert project["step_state"] == "FAILED"
     assert project["failure"]["code"] == "GEMINI_ERROR"
     assert "expired" in project["failure"]["message"]
-    assert raw_heads(settings, pid) == (None, image_head)
+    assert raw_heads(settings, pid) == (None, None)
 
     before_retry = len(fake_gemini.calls)
-    await run(signed_in, pid, step)
+    await run(signed_in, pid, "CHARACTERS")
 
     retry_calls = fake_gemini.calls[before_retry:]
     assert [call.kind for call in retry_calls] == ["upload", "structured"]
@@ -400,83 +360,176 @@ async def test_text_expiry_clears_only_text_and_user_retry_rebuilds_with_book(
     assert retry_calls[1].document_uri == "files/fake-book.txt"
     assert (await signed_in.get(f"/api/projects/{pid}")).json()[
         "status"
-    ] == expected_status
+    ] == "CHARACTERS_GENERATED"
 
 
-@pytest.mark.parametrize(
-    (
-        "step",
-        "prerequisites",
-        "text_head",
-        "image_head",
-        "retry_kinds",
-        "expected_status",
-    ),
-    [
-        (
-            "PORTRAITS",
-            ["STYLE", "CHARACTERS"],
-            "text-step-3-untouched",
-            "image-step-3-live",
-            ["image", "image", "image"],
-            "PORTRAITS_GENERATED",
-        ),
-        (
-            "ILLUSTRATIONS",
-            ["STYLE", "CHARACTERS", "PORTRAITS", "CHAPTERS"],
-            "text-step-5-untouched",
-            "image-step-5-live",
-            ["image"],
-            "DONE",
-        ),
-    ],
-    ids=["step-3-portraits", "step-5-illustrations"],
-)
-async def test_image_expiry_clears_only_image_and_user_retry_never_uploads_book(
-    signed_in,
-    settings,
-    fake_gemini,
-    step,
-    prerequisites,
-    text_head,
-    image_head,
-    retry_kinds,
-    expected_status,
+async def test_step_4_text_expiry_preserves_the_natural_portrait_image_head(
+    signed_in, settings, fake_gemini
 ):
     pid = await create(signed_in)
-    await advance(signed_in, pid, prerequisites)
-    seed_raw_heads(
-        settings,
-        pid,
-        text_head=text_head,
-        image_head=image_head,
-    )
+    await advance(signed_in, pid, ["STYLE", "CHARACTERS", "PORTRAITS"])
+    before = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert [character["image_state"] for character in before["characters"]] == [
+        "ready",
+        "ready",
+    ]
+    text_head, image_head = raw_heads(settings, pid)
+    assert text_head is not None
+    assert image_head is not None
     before_failure = len(fake_gemini.calls)
     fake_gemini.fail_on(
         before_failure, InteractionNotFound("interaction expired")
     )
 
-    await run(signed_in, pid, step)
+    await run(signed_in, pid, "CHAPTERS")
     await yield_and_drain()
 
     failed_calls = fake_gemini.calls[before_failure:]
-    assert len(failed_calls) == 1
-    assert [call.kind for call in failed_calls] == ["image"]
-    assert failed_calls[0].previous_interaction_id == image_head
-    assert raw_heads(settings, pid) == (text_head, None)
+    assert [call.kind for call in failed_calls] == ["structured"]
+    assert failed_calls[0].previous_interaction_id == text_head
+    assert failed_calls[0].document_uri is None
     project = (await signed_in.get(f"/api/projects/{pid}")).json()
     assert project["step_state"] == "FAILED"
     assert project["failure"]["code"] == "GEMINI_ERROR"
+    assert raw_heads(settings, pid) == (None, image_head)
 
     before_retry = len(fake_gemini.calls)
-    await run(signed_in, pid, step)
+    await run(signed_in, pid, "CHAPTERS")
 
     retry_calls = fake_gemini.calls[before_retry:]
-    assert [call.kind for call in retry_calls] == retry_kinds
-    assert all(call.kind != "upload" for call in retry_calls)
+    assert [call.kind for call in retry_calls] == ["upload", "structured"]
+    assert retry_calls[1].previous_interaction_id is None
+    assert retry_calls[1].document_uri == "files/fake-book.txt"
     assert (await signed_in.get(f"/api/projects/{pid}")).json()[
         "status"
-    ] == expected_status
+    ] == "CHAPTERS_GENERATED"
+
+
+async def test_step_3_image_expiry_keeps_portrait_one_and_reseeds_for_two(
+    signed_in, settings, fake_gemini
+):
+    pid = await create(signed_in)
+    await advance(signed_in, pid, ["STYLE", "CHARACTERS"])
+    before = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert [character["image_state"] for character in before["characters"]] == [
+        "pending",
+        "pending",
+    ]
+    text_head, image_head = raw_heads(settings, pid)
+    assert text_head is not None
+    assert image_head is None
+    first_prompt = before["characters"][0]["prompt"]
+    second_prompt = before["characters"][1]["prompt"]
+    before_failure = len(fake_gemini.calls)
+    fake_gemini.fail_on(
+        before_failure + 2, InteractionNotFound("interaction expired")
+    )
+
+    await run(signed_in, pid, "PORTRAITS")
+    await yield_and_drain()
+
+    failed_calls = fake_gemini.calls[before_failure:]
+    assert [call.kind for call in failed_calls] == ["image", "image", "image"]
+    assert failed_calls[0].previous_interaction_id is None
+    assert failed_calls[0].reference_image_count == 0
+    assert first_prompt in (failed_calls[1].prompt or "")
+    assert second_prompt in (failed_calls[2].prompt or "")
+    project = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert project["step_state"] == "FAILED"
+    assert project["failure"]["code"] == "GEMINI_ERROR"
+    assert [character["image_state"] for character in project["characters"]] == [
+        "ready",
+        "pending",
+    ]
+    assert raw_heads(settings, pid) == (text_head, None)
+
+    before_retry = len(fake_gemini.calls)
+    await run(signed_in, pid, "PORTRAITS")
+
+    retry_calls = fake_gemini.calls[before_retry:]
+    assert [call.kind for call in retry_calls] == ["image", "image"]
+    assert retry_calls[0].previous_interaction_id is None
+    assert retry_calls[0].reference_image_count == 1
+    assert retry_calls[1].previous_interaction_id is not None
+    assert first_prompt not in (retry_calls[1].prompt or "")
+    assert second_prompt in (retry_calls[1].prompt or "")
+    assert all(call.kind != "upload" for call in retry_calls)
+    retried = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert [character["image_state"] for character in retried["characters"]] == [
+        "ready",
+        "ready",
+    ]
+    assert retried["status"] == "PORTRAITS_GENERATED"
+    final_text_head, final_image_head = raw_heads(settings, pid)
+    assert final_text_head == text_head
+    assert final_image_head is not None
+
+
+async def test_step_5_image_expiry_preserves_text_and_retries_standalone(
+    signed_in, settings, fake_gemini
+):
+    pid = await create(signed_in)
+    await advance(
+        signed_in,
+        pid,
+        ["STYLE", "CHARACTERS", "PORTRAITS", "CHAPTERS"],
+    )
+    before = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert [character["image_state"] for character in before["characters"]] == [
+        "ready",
+        "ready",
+    ]
+    assert [chapter["image_state"] for chapter in before["chapters"]] == [
+        "pending"
+    ]
+    text_head, image_head = raw_heads(settings, pid)
+    assert text_head is not None
+    assert image_head is not None
+    chapter = before["chapters"][0]
+    before_failure = len(fake_gemini.calls)
+    fake_gemini.fail_on(
+        before_failure + 1, InteractionNotFound("interaction expired")
+    )
+
+    await run(signed_in, pid, "ILLUSTRATIONS")
+    await yield_and_drain()
+
+    failed_calls = fake_gemini.calls[before_failure:]
+    assert [call.kind for call in failed_calls] == ["image", "image"]
+    assert failed_calls[0].prompt == prompts.CHAPTER_SEED
+    assert failed_calls[0].previous_interaction_id == image_head
+    assert failed_calls[1].prompt == prompts.ILLUSTRATION_INSTRUCTION.format(
+        name=chapter["name"], prompt=chapter["prompt"]
+    )
+    assert failed_calls[1].previous_interaction_id is not None
+    project = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert project["step_state"] == "FAILED"
+    assert project["failure"]["code"] == "GEMINI_ERROR"
+    assert [chapter["image_state"] for chapter in project["chapters"]] == [
+        "pending"
+    ]
+    assert raw_heads(settings, pid) == (text_head, None)
+
+    before_retry = len(fake_gemini.calls)
+    await run(signed_in, pid, "ILLUSTRATIONS")
+
+    retry_calls = fake_gemini.calls[before_retry:]
+    assert [call.kind for call in retry_calls] == ["image"]
+    assert retry_calls[0].prompt == prompts.ILLUSTRATION_STANDALONE.format(
+        name=chapter["name"], prompt=chapter["prompt"]
+    )
+    assert retry_calls[0].previous_interaction_id is None
+    assert retry_calls[0].reference_image_count == 2
+    assert retry_calls[0].system_instruction == prompts.RULES
+    assert all(call.kind != "upload" for call in retry_calls)
+    retried = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert [chapter["image_state"] for chapter in retried["chapters"]] == [
+        "ready"
+    ]
+    assert retried["status"] == "DONE"
+    final_text_head, final_image_head = raw_heads(settings, pid)
+    assert final_text_head == text_head
+    assert final_image_head is not None
 
 
 # --------------------------------------------------------------------------
