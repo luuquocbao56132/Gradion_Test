@@ -56,3 +56,10 @@ async def aclient(app):
     ) as async_client:
         # create_app's lifespan does not run under ASGITransport; init explicitly.
         yield async_client
+
+
+@pytest.fixture(autouse=True)
+async def _drain_pipeline_tasks():
+    yield
+    from app import pipeline
+    await pipeline.drain_tasks()

@@ -3,11 +3,22 @@ from __future__ import annotations
 import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
-from app import files, store
+from app import files, pipeline, store
 from app.api.deps import current_user, get_db, get_settings
 from app.config import Settings
-from app.models import BookView, ProjectCreate, ProjectListItem, ProjectView
+from app.models import (
+    ApiError,
+    BookView,
+    ProjectCreate,
+    ProjectListItem,
+    ProjectView,
+    RunAccepted,
+    RunConflict,
+    RunRequest,
+)
+from app.steps import STEPS, StepState, status_before
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -18,6 +29,10 @@ def _load_view(conn, project_id: str, user_id: str, settings: Settings) -> Proje
     if view is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.")
     return view
+
+
+def _label(step) -> str:
+    return next(s.label for s in STEPS if s.name == step)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=ProjectView)
@@ -59,6 +74,40 @@ async def read_book(project_id: str, conn: sqlite3.Connection = Depends(get_db),
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.")
     return BookView(text=files.read_book(settings.data_dir, project_id))
+
+
+@router.post("/{project_id}/run", status_code=status.HTTP_202_ACCEPTED,
+             response_model=RunAccepted, responses={409: {"model": RunConflict}})
+async def run_step_endpoint(project_id: str, payload: RunRequest, request: Request,
+                            conn: sqlite3.Connection = Depends(get_db),
+                            user: sqlite3.Row = Depends(current_user),
+                            settings: Settings = Depends(get_settings)):
+    if store.get_project(conn, project_id, user["id"]) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.")
+
+    claimed = store.begin_step(conn, project_id,
+                               expected_status=status_before(payload.step),
+                               server_run_id=settings.server_run_id, now=store.now_iso())
+    # Read after the transition and before returning. sqlite3 is synchronous, so
+    # no await intervenes and the spawned task cannot have moved on yet: the 202
+    # body always shows RUNNING.
+    view = _load_view(conn, project_id, user["id"], settings)
+
+    if not claimed:
+        message = (
+            "That step is already running." if view.step_state == StepState.RUNNING
+            else f"This project is ready for {_label(view.current_step)}, "
+                 f"not {_label(payload.step)}."
+        ) if view.current_step else "This project is already complete."
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=RunConflict(error=ApiError(code="CONFLICT", message=message),
+                                project=view).model_dump(mode="json"),
+        )
+
+    pipeline.spawn(project_id=project_id, user_id=user["id"], step=payload.step,
+                   style=payload.style, deps=request.app.state.deps)
+    return RunAccepted(project=view)
 
 
 def _serve_artifact(conn, *, project_id: str, user: sqlite3.Row, settings: Settings,
