@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import AppShell from './components/AppShell';
+import NewProject from './components/NewProject';
 import ProjectList from './components/ProjectList';
 import SignIn from './components/SignIn';
 import StateMessage from './components/StateMessage';
@@ -40,7 +41,10 @@ export default function App() {
         <ProjectList onOpen={(id) => navigate(`#/projects/${id}`)}
                      onNew={() => navigate('#/projects/new')} />
       )}
-      {route.name === 'new' && <p>New project</p>}
+      {route.name === 'new' && (
+        <NewProject onCreated={(id) => navigate(`#/projects/${id}`)}
+                    onCancel={() => navigate('#/projects')} />
+      )}
       {route.name === 'detail' && <p>Project {route.id}</p>}
     </AppShell>
   );
