@@ -42,14 +42,21 @@ def broadcast_state(project_id: str, user_id: str, deps: Deps) -> None:
 
     pipeline.py builds the payload; realtime.py only moves it. Called strictly
     after COMMIT, never inside a transaction (design 3.3, 9.4).
+
+    Never raises. Broadcast happens strictly after COMMIT, so even total
+    broadcaster failure leaves durable state correct - a closed browser tab must
+    not fail a pipeline step (design 9.4).
     """
     if deps.registry is None:
         return
-    with db.get_conn(deps.settings) as conn:
-        view = store.read_project_view(conn, project_id, user_id,
-                                       server_run_id=deps.settings.server_run_id)
-    if view is not None:
-        deps.registry.publish(project_id, state_message(view))
+    try:
+        with db.get_conn(deps.settings) as conn:
+            view = store.read_project_view(conn, project_id, user_id,
+                                           server_run_id=deps.settings.server_run_id)
+        if view is not None:
+            deps.registry.publish(project_id, state_message(view))
+    except Exception:
+        pass
 
 
 def _record_failure(project_id: str, deps: Deps, code: str, message: str,
