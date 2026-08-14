@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import type { ProjectView, StepName } from '../types';
 import BookTextPanel from './BookTextPanel';
@@ -11,39 +11,107 @@ import StylePanel from './StylePanel';
 export default function ProjectDetail({ projectId, onBack }: {
   projectId: string; onBack: () => void;
 }) {
-  const [project, setProject] = useState<ProjectView | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [transportError, setTransportError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [projectState, setProjectState] = useState<{
+    projectId: string; value: ProjectView;
+  } | null>(null);
+  const [loadErrorState, setLoadErrorState] = useState<{
+    projectId: string; message: string;
+  } | null>(null);
+  const [transportErrorState, setTransportErrorState] = useState<{
+    projectId: string; message: string;
+  } | null>(null);
+  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const currentProjectId = useRef(projectId);
+  const truthGeneration = useRef(0);
+  const runGeneration = useRef(0);
+
+  // Invalidate the previous project's work during render, before a late
+  // completion gets an opportunity to publish into the new route.
+  if (currentProjectId.current !== projectId) {
+    currentProjectId.current = projectId;
+    truthGeneration.current += 1;
+    runGeneration.current += 1;
+  }
 
   const load = useCallback(async () => {
-    setLoadError(null);
-    setProject(null);
+    const requestProjectId = projectId;
+    const generation = ++truthGeneration.current;
+    setLoadErrorState(null);
+    setTransportErrorState(null);
+    setProjectState(null);
     try {
-      setProject(await api.getProject(projectId));
+      const nextProject = await api.getProject(requestProjectId);
+      if (mounted.current && currentProjectId.current === requestProjectId &&
+          truthGeneration.current === generation) {
+        setProjectState({ projectId: requestProjectId, value: nextProject });
+      }
     } catch (err) {
-      setLoadError((err as Error).message);
+      if (mounted.current && currentProjectId.current === requestProjectId &&
+          truthGeneration.current === generation) {
+        setLoadErrorState({ projectId: requestProjectId, message: (err as Error).message });
+      }
     }
   }, [projectId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    mounted.current = true;
+    void load();
+    return () => {
+      mounted.current = false;
+      truthGeneration.current += 1;
+      runGeneration.current += 1;
+    };
+  }, [load]);
 
   const run = async (step: StepName, style?: string) => {
-    setBusy(true);
-    setTransportError(null);
+    const requestProjectId = projectId;
+    const requestRunGeneration = ++runGeneration.current;
+    const generation = ++truthGeneration.current;
+    setBusyProjectId(requestProjectId);
+    setTransportErrorState(null);
     try {
       // 202 and 409 both carry authoritative state. Neither is a local
       // transition, and neither is a pipeline failure (design 10.5).
-      const outcome = await api.runStep(projectId, step, style);
-      setProject(outcome.project);
+      const outcome = await api.runStep(requestProjectId, step, style);
+      if (mounted.current && currentProjectId.current === requestProjectId &&
+          truthGeneration.current === generation) {
+        // Seal this accepted snapshot against every load that predates the run.
+        truthGeneration.current += 1;
+        setProjectState({ projectId: requestProjectId, value: outcome.project });
+      }
     } catch (err) {
-      // A transport failure means we may be behind, never that the step failed.
-      setTransportError((err as Error).message);
-      await load();
+      if (mounted.current && currentProjectId.current === requestProjectId &&
+          truthGeneration.current === generation) {
+        // A transport failure means we may be behind, never that the step
+        // failed. Preserve the last snapshot and reconcile once in the
+        // background; this GET neither becomes a loading screen nor retries.
+        setTransportErrorState({
+          projectId: requestProjectId, message: (err as Error).message,
+        });
+        const reconciliationGeneration = ++truthGeneration.current;
+        void api.getProject(requestProjectId).then((nextProject) => {
+          if (mounted.current && currentProjectId.current === requestProjectId &&
+              truthGeneration.current === reconciliationGeneration) {
+            setProjectState({ projectId: requestProjectId, value: nextProject });
+          }
+        }).catch(() => {
+          // The prior authoritative snapshot and transport banner stay usable.
+        });
+      }
     } finally {
-      setBusy(false);
+      if (mounted.current && currentProjectId.current === requestProjectId &&
+          runGeneration.current === requestRunGeneration) {
+        setBusyProjectId(null);
+      }
     }
   };
+
+  const project = projectState?.projectId === projectId ? projectState.value : null;
+  const loadError = loadErrorState?.projectId === projectId ? loadErrorState.message : null;
+  const transportError = transportErrorState?.projectId === projectId
+    ? transportErrorState.message : null;
+  const busy = busyProjectId === projectId;
 
   if (loadError) return <StateMessage kind="error" message={loadError} onRetry={load} />;
   if (project === null) return <StateMessage kind="loading" label="Loading project…" />;
