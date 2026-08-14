@@ -98,8 +98,41 @@ async def run_style(ctx: StepContext, *, style: str | None) -> None:
                          text_interaction_id=result.interaction_id)
 
 
+# --------------------------------------------------------------------------
+# Step 2 - Characters
+# --------------------------------------------------------------------------
+
+async def run_characters(ctx: StepContext) -> None:
+    row, characters, _ = _load(ctx)
+    if characters:
+        return
+
+    head = row["text_interaction_id"]
+    if head is not None:
+        prompt = prompts.CHARACTERS_INSTRUCTION
+        document_uri = None
+    else:
+        # A NULL head already means "build this step's call standalone". This is
+        # the first-run branch and the post-expiry branch at once (design 7.5).
+        prompt = prompts.characters_standalone(row["style_text"] or "")
+        document_uri = await ctx.gemini.upload_book(
+            files.book_path(ctx.settings.data_dir, ctx.project_id))
+
+    result = await ctx.gemini.create_structured(
+        prompt=prompt, previous_interaction_id=head, document_uri=document_uri,
+        item_schema=PROMPT_ITEM_SCHEMA, max_items=MAX_CHARACTERS)
+    items = _validated(result.items, MAX_CHARACTERS, "characters")
+
+    with db.get_conn(ctx.settings) as conn:
+        store.save_characters(conn, ctx.project_id,
+                              [(i["name"], i["prompt"]) for i in items],
+                              text_interaction_id=result.interaction_id)
+
+
 async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None) -> None:
     if step == StepName.STYLE:
         await run_style(ctx, style=style)
+    elif step == StepName.CHARACTERS:
+        await run_characters(ctx)
     else:
         raise NotImplementedError(step)   # Tasks 19-22 fill this in
