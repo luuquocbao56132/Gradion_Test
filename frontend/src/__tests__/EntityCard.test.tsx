@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { expect, test } from 'vitest';
 import EntityCard from '../components/EntityCard';
 import StylePanel from '../components/StylePanel';
@@ -32,6 +32,10 @@ test('[path, null] renders the first as ready and the second as generating', () 
   render(<>{firstReady.map((e) => <EntityCard key={e.id} kind="character" item={e} />)}</>);
   const image = screen.getByRole('img', { name: /portrait of toad/i });
   expect(image).toHaveAttribute('src', '/api/projects/p1/characters/c1/portrait');
+  const readyCard = image.closest('article');
+  expect(readyCard).not.toBeNull();
+  expect(within(readyCard!).getByRole('heading', { name: 'Toad' })).toBeInTheDocument();
+  expect(within(readyCard!).getByText('A stout toad in a green coat')).toBeInTheDocument();
   expect(screen.getByText(/generating portrait for ratty/i)).toBeInTheDocument();
 });
 
@@ -47,6 +51,17 @@ test('a chapter card renders an illustration with a wider art slot', () => {
       image_state: 'ready', image_url: '/api/projects/p1/chapters/ch1/illustration' })} />);
   expect(screen.getByRole('img', { name: /illustration for chapter one/i })).toBeInTheDocument();
   expect(container.querySelector('.art.chapter')).not.toBeNull();
+});
+
+test('a generating chapter announces its illustration progress accessibly', () => {
+  const { container } = render(
+    <EntityCard kind="chapter" item={entity({ id: 'ch1', name: 'Chapter One',
+      image_state: 'generating' })} />);
+
+  const status = screen.getByRole('status');
+  expect(status).toHaveTextContent(/generating illustration for chapter one/i);
+  expect(status).toHaveAttribute('aria-live', 'polite');
+  expect(container.querySelector('.spinner')).toHaveAttribute('aria-hidden', 'true');
 });
 
 test('the style panel shows nothing before a style exists', () => {

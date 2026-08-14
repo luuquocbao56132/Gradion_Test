@@ -1,6 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import StateMessage from './StateMessage';
+
+interface LoadState {
+  projectId: string;
+  text: string | null;
+  loading: boolean;
+  error: string | null;
+}
 
 /**
  * A permanent disclosure panel, not a modal. The book is reference material you
@@ -11,37 +18,73 @@ import StateMessage from './StateMessage';
 export default function BookTextPanel({ projectId, excerpt }: {
   projectId: string; excerpt: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [disclosure, setDisclosure] = useState({ projectId, open: false });
+  const [loadState, setLoadState] = useState<LoadState>({
+    projectId, text: null, loading: false, error: null,
+  });
+  const mounted = useRef(true);
+  const currentProject = useRef(projectId);
+  const requestGeneration = useRef(0);
+
+  if (currentProject.current !== projectId) {
+    currentProject.current = projectId;
+    requestGeneration.current += 1;
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestGeneration.current += 1;
+    };
+  }, []);
+
+  const open = disclosure.projectId === projectId && disclosure.open;
+  const visibleState = loadState.projectId === projectId ? loadState : null;
 
   const load = async () => {
-    setLoading(true);
-    setError(null);
+    const requestProject = projectId;
+    const generation = ++requestGeneration.current;
+    setLoadState({
+      projectId: requestProject, text: null, loading: true, error: null,
+    });
     try {
-      setText(await api.getBook(projectId));
+      const text = await api.getBook(requestProject);
+      if (mounted.current && currentProject.current === requestProject &&
+          requestGeneration.current === generation) {
+        setLoadState({
+          projectId: requestProject, text, loading: false, error: null,
+        });
+      }
     } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
+      if (mounted.current && currentProject.current === requestProject &&
+          requestGeneration.current === generation) {
+        setLoadState({
+          projectId: requestProject, text: null, loading: false,
+          error: (err as Error).message,
+        });
+      }
     }
   };
 
-  const expand = async () => {
-    setOpen(true);
-    if (text === null && !loading) await load();
+  const expand = () => {
+    setDisclosure({ projectId, open: true });
+    if (visibleState?.text === null && !visibleState.loading) void load();
+    if (visibleState === null) void load();
   };
 
   return (
     <section className="side-note book-panel">
       <h5>Book text</h5>
       {!open && <p className="excerpt">{excerpt}</p>}
-      {open && loading && <StateMessage kind="loading" label="Loading the full text…" />}
-      {open && error && <StateMessage kind="error" message={error} onRetry={load} />}
-      {open && text !== null && <pre className="book-full">{text}</pre>}
+      {open && visibleState?.loading &&
+        <StateMessage kind="loading" label="Loading the full text…" />}
+      {open && visibleState?.error &&
+        <StateMessage kind="error" message={visibleState.error} onRetry={load} />}
+      {open && visibleState?.text !== null && visibleState?.text !== undefined &&
+        <pre className="book-full">{visibleState.text}</pre>}
       <button type="button" className="gd-btn gd-btn-ghost gd-btn-sm"
-              onClick={open ? () => setOpen(false) : expand}>
+              onClick={open ? () => setDisclosure({ projectId, open: false }) : expand}>
         {open ? 'Collapse' : 'Read full text →'}
       </button>
     </section>
