@@ -85,4 +85,5 @@ class GeminiClient(Protocol):
 
     async def create_image(self, *, prompt: str, previous_interaction_id: str | None = None,
                            reference_images: Sequence[ReferenceImage] = (),
-                           system_instruction: str | None = None) -> ImageResult: ...
+                           system_instruction: str | None = None,
+                           expect_image: bool = True) -> ImageResult: ...

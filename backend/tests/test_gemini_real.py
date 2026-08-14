@@ -244,3 +244,31 @@ async def test_upload_returns_the_file_uri(settings, tmp_path):
     client, _ = make(settings, interaction(text="ok"))
 
     assert await client.upload_book(book) == "files/uploaded-123"
+
+
+async def test_a_seeding_call_tolerates_a_response_with_no_image(settings):
+    """Observed live: the image model answers a setup instruction in prose -
+    "Great! I understand the style and rules you're looking for..." - with
+    output_image None, and only the next chained call returns a picture.
+    Notebook cell 35 agrees: it keeps the seed's .id and never extracts an image.
+
+    Demanding an image here failed step 3 before a single portrait was attempted.
+    UAT caught it; the fake had hidden it by returning a PNG regardless.
+    """
+    client, _ = make(settings, interaction(text="Great! I understand the style.",
+                                           image=None, steps=[]))
+
+    result = await client.create_image(prompt="seed the chain", expect_image=False)
+
+    assert result.interaction_id == "interactions/abc"
+    assert result.data == b""
+    assert result.mime_type == ""
+
+
+async def test_a_generating_call_still_requires_an_image(settings):
+    """The tolerance is scoped to seeds. A call that should produce a picture and
+    does not is still a failure, not a silently empty artifact."""
+    client, _ = make(settings, interaction(text="sorry, no", image=None, steps=[]))
+
+    with pytest.raises(GeminiError, match="no image"):
+        await client.create_image(prompt="draw a toad")

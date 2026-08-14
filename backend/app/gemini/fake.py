@@ -22,6 +22,9 @@ class RecordedCall:
     max_items: int | None = None
     reference_image_count: int = 0
     system_instruction: str | None = None
+    # False marks a chain-seeding image call, which returns prose rather than a
+    # picture. Recorded so tests can assert seeds are seeds.
+    expect_image: bool = True
 
 class FakeGeminiClient:
     TINY_PNG = base64.b64decode(_TINY_PNG_B64)
@@ -92,6 +95,20 @@ class FakeGeminiClient:
 
     async def create_image(self, *, prompt: str, previous_interaction_id: str | None = None,
                            reference_images: Sequence[ReferenceImage] = (),
-                           system_instruction: str | None = None) -> ImageResult:
-        await self._record(RecordedCall(kind="image", prompt=prompt, previous_interaction_id=previous_interaction_id, reference_image_count=len(reference_images), system_instruction=system_instruction))
+                           system_instruction: str | None = None,
+                           expect_image: bool = True) -> ImageResult:
+        """A seeding call (`expect_image=False`) returns no image bytes.
+
+        That mirrors the live provider: the image model answers a setup
+        instruction in prose with output_image None, and only the next chained
+        call produces a picture. Returning a PNG here regardless would let the
+        fake hide a real production failure, which is exactly what it did before
+        UAT caught it.
+        """
+        await self._record(RecordedCall(
+            kind="image", prompt=prompt, previous_interaction_id=previous_interaction_id,
+            reference_image_count=len(reference_images),
+            system_instruction=system_instruction, expect_image=expect_image))
+        if not expect_image:
+            return ImageResult(interaction_id=self._mint(), data=b"", mime_type="")
         return ImageResult(interaction_id=self._mint(), data=self.TINY_PNG, mime_type="image/png")

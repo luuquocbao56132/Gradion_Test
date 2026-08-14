@@ -144,12 +144,15 @@ async def run_portraits(ctx: StepContext) -> None:
 
     head = row["image_interaction_id"]
     if head is None:
+        # Seeding call: the model acknowledges the style and rules in prose, so
+        # no image is expected back (notebook cell 35 keeps only its id).
         seed = await ctx.gemini.create_image(
             prompt=prompts.IMAGE_SEED.format(
                 title=row["title"],
                 style=prompts.STYLE_WRAPPER.format(style=row["style_text"] or ""),
                 rules=prompts.RULES),
-            reference_images=_reference_images(ctx, capped, "portrait_path"))
+            reference_images=_reference_images(ctx, capped, "portrait_path"),
+            expect_image=False)
         head = seed.interaction_id
 
     for character in pending:
@@ -214,8 +217,10 @@ async def run_illustrations(ctx: StepContext) -> None:
 
     head = row["image_interaction_id"]
     if head is not None:
+        # Chapter-mode seeding call: same prose-not-picture response as step 3's.
         seed = await ctx.gemini.create_image(prompt=prompts.CHAPTER_SEED,
-                                             previous_interaction_id=head)
+                                             previous_interaction_id=head,
+                                             expect_image=False)
         head = seed.interaction_id
         references: list[ReferenceImage] = []
     else:

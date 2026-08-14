@@ -490,3 +490,30 @@ async def test_an_existing_illustration_is_not_regenerated(conn, with_chapters, 
     await run_step(StepName.ILLUSTRATIONS, with_chapters)
 
     assert fake_gemini.calls == []
+
+
+async def test_the_image_chain_seed_does_not_ask_for_an_image(conn, with_characters,
+                                                              fake_gemini):
+    """The seed establishes style and rules; the model replies in prose. Marking
+    it expect_image=False is what stops step 3 failing before any portrait is
+    attempted (found by UAT against live Gemini, not by the fake)."""
+    await run_step(StepName.PORTRAITS, with_characters)
+
+    image_calls = [c for c in fake_gemini.calls if c.kind == "image"]
+    seed, *portraits = image_calls
+    assert seed.expect_image is False, "the chain seed must not demand an image"
+    assert seed.previous_interaction_id is None
+    assert portraits, "expected portrait calls after the seed"
+    assert all(c.expect_image is True for c in portraits), \
+        "portrait calls must still require a real image"
+
+
+async def test_the_chapter_mode_seed_does_not_ask_for_an_image(conn, with_chapters,
+                                                               fake_gemini):
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    image_calls = [c for c in fake_gemini.calls if c.kind == "image"]
+    seed, *drawn = image_calls
+    assert seed.prompt == prompts.CHAPTER_SEED
+    assert seed.expect_image is False
+    assert all(c.expect_image is True for c in drawn)

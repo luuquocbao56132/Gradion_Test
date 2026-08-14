@@ -152,7 +152,17 @@ class RealGeminiClient:
 
     async def create_image(self, *, prompt: str, previous_interaction_id: str | None = None,
                            reference_images: Sequence[ReferenceImage] = (),
-                           system_instruction: str | None = None) -> ImageResult:
+                           system_instruction: str | None = None,
+                           expect_image: bool = True) -> ImageResult:
+        """`expect_image=False` marks a chain-seeding call.
+
+        The image model answers a setup instruction in prose, not with a picture
+        - observed live: the seed returns "Great! I understand the style and
+          rules you're looking for..." with output_image None, while the very
+        next chained call returns an image. Notebook cell 35 matches: it keeps
+        only the seed's .id and never extracts an image from it. Demanding one
+        would fail the step before any portrait is attempted.
+        """
         payload: Any = prompt
         if reference_images:
             payload = [{"type": "text", "text": prompt}] + [
@@ -168,5 +178,7 @@ class RealGeminiClient:
             kwargs["system_instruction"] = system_instruction
         interaction = await self._create(
             had_previous_interaction=previous_interaction_id is not None, **kwargs)
+        if not expect_image:
+            return ImageResult(interaction_id=interaction.id, data=b"", mime_type="")
         data, mime_type = self._image_of(interaction)
         return ImageResult(interaction_id=interaction.id, data=data, mime_type=mime_type)
