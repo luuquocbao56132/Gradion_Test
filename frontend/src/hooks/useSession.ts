@@ -16,6 +16,7 @@ export function useSession() {
   const [isSigningIn, setIsSigningIn] = useState(false);
 
   const bootstrap = useCallback(async () => {
+    setError(null);
     setStatus('loading');
     try {
       setSession(await api.getSession());

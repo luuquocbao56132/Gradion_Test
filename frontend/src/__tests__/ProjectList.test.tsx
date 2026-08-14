@@ -71,13 +71,14 @@ test('needs_attention shows a warning beside the pill, never instead of it', () 
   expect(screen.getByText(/needs attention/i)).toBeInTheDocument();
 });
 
-test('a row opens on click and on Enter', async () => {
+test('a row opens on click, Enter, and Space', async () => {
   const onOpen = vi.fn();
   render(<ProjectRow project={item()} onOpen={onOpen} />);
   const row = screen.getByRole('button', { name: /willows/i });
   await userEvent.click(row);
   row.focus();
   await userEvent.keyboard('{Enter}');
-  expect(onOpen).toHaveBeenCalledTimes(2);
+  await userEvent.keyboard(' ');
+  expect(onOpen).toHaveBeenCalledTimes(3);
   expect(onOpen).toHaveBeenCalledWith('p1');
 });

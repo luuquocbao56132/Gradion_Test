@@ -157,9 +157,11 @@ async def test_an_over_cap_response_fails_validation_rather_than_being_sliced(
 
 
 async def test_a_response_missing_a_prompt_fails_validation(conn, styled, fake_gemini):
-    fake_gemini.invalid_json_on(0)
-    with pytest.raises(InvalidStructuredOutput):
+    fake_gemini.CHARACTER_ITEMS = [{"name": "Toad"}]
+
+    with pytest.raises(InvalidStructuredOutput, match="usable name and prompt"):
         await run_step(StepName.CHARACTERS, styled)
+
     assert store.list_characters(conn, styled.project_id) == []
 
 
@@ -219,9 +221,10 @@ async def test_portraits_seed_the_image_chain_unchained_then_chain_each_portrait
 
     assert first.prompt == prompts.PORTRAIT_INSTRUCTION.format(
         name="Toad", prompt="a stout toad")
-    assert first.previous_interaction_id is not None
-    assert second.previous_interaction_id is not None
-    assert second.previous_interaction_id != first.previous_interaction_id
+    assert first.previous_interaction_id == "fake-interaction-1"
+    assert second.previous_interaction_id == "fake-interaction-2"
+    assert project_row(conn, with_characters)["image_interaction_id"] == \
+        "fake-interaction-3"
 
 
 async def test_each_portrait_lands_on_disk_and_advances_the_image_head(
@@ -425,8 +428,10 @@ async def test_illustrations_seed_chapter_mode_off_the_last_portrait_then_draw(
     assert seed.previous_interaction_id == "i-img-2"     # continues the image chain
     assert draw.prompt == prompts.ILLUSTRATION_INSTRUCTION.format(
         name="Chapter One", prompt="a sunlit river bank")
-    assert draw.previous_interaction_id is not None
+    assert draw.previous_interaction_id == "fake-interaction-1"
     assert draw.reference_image_count == 0               # chained mode needs no refs
+    assert project_row(conn, with_chapters)["image_interaction_id"] == \
+        "fake-interaction-2"
 
 
 async def test_the_illustration_lands_on_disk_and_completes_the_project_data(

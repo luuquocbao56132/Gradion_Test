@@ -3,15 +3,15 @@ import userEvent from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 import SignIn from '../components/SignIn';
 
-test('a valid name and email are submitted', async () => {
+test('name and email are trimmed and the email is lowercased before submission', async () => {
   const onSubmit = vi.fn().mockResolvedValue(undefined);
   render(<SignIn onSubmit={onSubmit} error={null} busy={false} />);
 
-  await userEvent.type(screen.getByLabelText(/full name/i), 'Ada');
-  await userEvent.type(screen.getByLabelText(/email/i), 'ada@example.com');
+  await userEvent.type(screen.getByLabelText(/full name/i), '  Ada Lovelace  ');
+  await userEvent.type(screen.getByLabelText(/email/i), '  ADA@Example.COM  ');
   await userEvent.click(screen.getByRole('button', { name: /continue/i }));
 
-  expect(onSubmit).toHaveBeenCalledWith('Ada', 'ada@example.com');
+  expect(onSubmit).toHaveBeenCalledWith('Ada Lovelace', 'ada@example.com');
 });
 
 test('an empty name blocks submission and explains why', async () => {

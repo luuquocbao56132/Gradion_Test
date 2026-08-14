@@ -26,3 +26,33 @@ test('the sign-in button is disabled while session creation is pending', async (
     expect(screen.getByRole('button', { name: /signing in|continue/i })).toBeDisabled();
   });
 });
+
+test('a rejected sign-in shows the error and releases the disabled state', async () => {
+  vi.spyOn(api, 'getSession').mockResolvedValue(null);
+  vi.spyOn(api, 'createSession').mockRejectedValue(new Error('Sign in failed'));
+  const user = userEvent.setup();
+
+  render(<App />);
+
+  await user.type(await screen.findByLabelText(/full name/i), 'Ada');
+  await user.type(screen.getByLabelText(/email/i), 'ada@example.com');
+  await user.click(screen.getByRole('button', { name: /continue/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Sign in failed');
+  expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled();
+});
+
+test('a successful bootstrap retry returns to signed-out without the stale error', async () => {
+  const getSession = vi.spyOn(api, 'getSession')
+    .mockRejectedValueOnce(new Error('Network down'))
+    .mockResolvedValueOnce(null);
+
+  render(<App />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Network down');
+  await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+  expect(await screen.findByLabelText(/full name/i)).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(getSession).toHaveBeenCalledTimes(2);
+});
