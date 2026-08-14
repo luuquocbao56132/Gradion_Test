@@ -47,7 +47,7 @@ Contradictions found while reading the three sources, and how each is resolved:
 | 2 | `app-demo.html:700` renders the book-text panel **only when `p.style` is falsy**, so the book becomes unreachable once step 1 completes — the sole call site of `openBookModal` disappears with it. §4.4 requires the book "readable in full, at any point in the pipeline". | The book gets its own permanent panel, independent of style. The demo's behaviour is a bug and is not reproduced. |
 | 3 | Notebook section 5 contains two variants: cells 37–38 (image-chain chaining, the required path) and cells 39–44, labelled *"Bonus: going further with more granular control"* (explicit reference images, `system_instruction`, no chaining). | Chaining is the normal path. The reference-image variant is the standalone-reconstruction path used when a chain is unusable (§7.5). |
 | 4 | Assessment §03 calls the 2-character / 1-chapter caps "hard requirements"; §08 offers "more characters or chapters — still bounded, and document the changed caps" as a bonus. | §03 is binding for this submission. Changed caps are intentionally out of scope, not forbidden. |
-| 5 | "Never auto-retry a Gemini call" reads as a divergence from the notebook, but notebook cell 12 already sets `HttpRetryOptions(attempts=1, …)`. | Not a divergence. We match the notebook and say so rather than claiming an override. |
+| 5 | Assessment §4.3 forbids auto-retrying a Gemini call. `google-genai` **retries automatically by default** — `HttpRetryOptions.attempts` documents *"Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5."* So the SDK's out-of-the-box behaviour violates §4.3. Our committed notebook copy does carry `HttpRetryOptions(attempts=1, …)` at cell 12 — but that value is **our own adaptation made while running the notebook** (`note.md`: *"Chỉnh config khi integrate notebook: … disable automatic retry"*), not the reference pipeline's native configuration. | **A deliberate override, stated as one.** Follow the notebook for pipeline mechanics; override its client configuration for retries. The production client is constructed with `HttpRetryOptions(attempts=1)` because §4.3 requires it. The notebook is explicitly *not* cited as justification: it cannot justify a setting we put there ourselves. |
 
 **Provider facts the design depends on** (verified against the Gemini docs):
 
@@ -179,8 +179,8 @@ A project whose two portraits are both on disk but whose `status` is still
 did not finish. The retry finds no images left to make and advances.
 
 Derived at read time, never stored: `current_step` (from `status` via the
-ordered `STEPS` list), the display status pill, `is_interrupted`, and per-item
-progress.
+ordered `STEPS` list), `display_status`, `needs_attention`, `is_interrupted`,
+and per-item progress.
 
 ### 4.2 Display status
 
@@ -190,15 +190,28 @@ disagree between screens:
 
 ```
 status == DONE                            → Done
-step_state == FAILED or is_interrupted    → Needs attention
 status == CREATED and step_state == IDLE  → Draft
 otherwise                                 → In progress
 ```
 
-§4.4 names three pills. *Needs attention* is a deliberate fourth: the demo
-"never fails, so there is no error state to copy", and a failed project
-rendering as *In progress* on the list is a lie that sends the user looking for
-a spinner.
+**The pill vocabulary is exactly the three values §4.4 names.** An earlier draft
+added a fourth, *Needs attention*, for failed and interrupted projects. That
+invents a status the assessment does not name, in the one place the assessment
+is explicit about wording, so it is removed.
+
+The concern behind it was real — a failed project rendering as *In progress*
+sends the user looking for a spinner — and is answered without touching the
+vocabulary. The row carries a **separate boolean**, computed by the same shared
+function:
+
+```
+needs_attention = (step_state == FAILED) or is_interrupted
+```
+
+rendered as a warning affordance **beside** the pill, never in place of it.
+`display_status` and `needs_attention` are independent DTO fields, so the pill
+cannot be corrupted by the warning and both are consistent across the list
+serializer, the detail serializer, the socket payload and 409 bodies.
 
 ### 4.3 Errors
 
@@ -211,7 +224,7 @@ not an outcome (§7.5). When it surfaces it does so as an ordinary
 expired and that retrying will rebuild it from saved work. The code drives UI
 treatment; the message carries the specifics.
 
-### 4.5 Required SQLite pragmas
+### 4.4 Required SQLite pragmas
 
 Load-bearing rather than ceremony, given a background writer and concurrent
 readers:
@@ -227,7 +240,7 @@ Database access is synchronous `sqlite3` on the event loop, with a short-lived
 connection per operation. At one user and microsecond writes the blocking is
 invisible; it would be unacceptable at scale.
 
-### 4.4 Per-item progress
+### 4.5 Per-item progress
 
 `portrait_path` distinguishes **completed** from **incomplete** — it says
 nothing about which incomplete item is in flight. The in-flight item is
@@ -279,6 +292,7 @@ UPDATE projects
 | `(S, RUNNING)` with current `server_run_id` | user runs anything | rejected, 409 |
 | `(S, RUNNING)` | handler succeeds | `(next(S), IDLE)` — one UPDATE |
 | `(S, RUNNING)` | handler raises | `(S, FAILED)` + error fields |
+| `(S, RUNNING)` | task cancelled | `(S, FAILED)` + error fields, ownership-guarded, `CancelledError` re-raised (§6.3) |
 | any | user runs a non-current step | rejected, 409 |
 
 ### 5.3 Interrupted steps: `server_run_id`, not a timeout
@@ -363,9 +377,18 @@ natively.
 No queue, no worker process, no broker. The detached task is the *smaller*
 option, not the fancier one.
 
-### 6.2 Idempotent handlers, and crash behaviour
+### 6.2 Resume-aware handlers, and crash behaviour
 
 Each step handler does **only the work not already persisted**.
+
+**They are resume-aware, not idempotent.** Skipping persisted work makes a retry
+cheap and lossless within a step. It does not make the handler idempotent in the
+strict sense: the Gemini call is an external side effect, and a call whose
+response is lost to process death leaves nothing on disk, so a later
+user-triggered retry genuinely repeats it. Calling these handlers "idempotent"
+would overclaim the exact boundary §5.5 draws. Throughout this document and the
+implementation plan they are **resume-aware** / **checkpoint-aware** /
+**resumable**.
 
 | Process dies… | On disk | On retry after restart |
 |---|---|---|
@@ -379,9 +402,48 @@ Row 3 delivers "never losing generated results". Row 4 makes a retry after a
 near-complete step cheap. Both fall out of resumability-within-a-step rather
 than being special-cased.
 
-In-process task cancellation is covered by `finally`, which records `FAILED`.
-Process death is covered by `server_run_id`. Neither leaves a permanently
-`RUNNING` step.
+Process death is covered by `server_run_id`. In-process cancellation is covered
+by §6.3. Neither leaves a permanently `RUNNING` step.
+
+### 6.3 Cancellation
+
+A detached task can be cancelled — most realistically at process shutdown, when
+the event loop cancels outstanding tasks. Cancellation must not leave
+`step_state='RUNNING'` stamped with the **current** `server_run_id`, because
+`is_interrupted` is precisely a comparison against the current id. Such a row is
+neither running nor recoverable, and no user action clears it. It is the one
+shape of stuck-forever that `server_run_id` alone does not answer.
+
+The rule, in the task wrapper:
+
+```python
+try:
+    await handler(...)
+    store.complete_step(project_id, run_id, next_status)
+except asyncio.CancelledError:
+    store.fail_step(project_id, run_id, "INTERNAL",
+                    "The step was cancelled before it finished. Retry to run it again.")
+    raise                       # re-raised, never swallowed
+except Exception as exc:
+    store.fail_step(project_id, run_id, code_for(exc), message_for(exc))
+```
+
+Three properties make this correct rather than hopeful:
+
+- **`fail_step` is ownership-guarded.** Its `WHERE` clause is
+  `id=:pid AND step_state='RUNNING' AND server_run_id=:run_id`. A task that no
+  longer owns the run writes nothing, so a late cancellation cannot clobber a
+  newer execution that legitimately took the step over.
+- **The recovery write cannot itself be cancelled.** `store.*` is synchronous
+  `sqlite3` (§4.4) containing no `await`, so it runs to completion inside the
+  cancelled task. An `await`ing cleanup would be re-cancelled at its first
+  suspension point and write nothing.
+- **`CancelledError` is re-raised**, so `asyncio` still observes the task as
+  cancelled and shutdown is not stalled by a task that swallowed its own
+  cancellation.
+
+The result is `(S, FAILED)` — an ordinary retryable state, reached through the
+ordinary Retry command. No durable worker, no reaper task, no timeout sweep.
 
 ---
 
@@ -504,6 +566,16 @@ and its interaction becomes the new head:
 | 4 | `[intro + style_text + character prompts + instruction, document]` + schema | re-uploaded |
 | 5 | portrait files as reference images + chapter prompt + rules as `system_instruction` — notebook cells 39–44 | none |
 
+**Which portraits step 5 sends as references.** Notebook cell 44 selects
+reference images by `chapter["characters"]`, which requires the chapter schema
+from the *bonus* cells 40–41 (`name`, `prompt`, `characters`). The required path
+— cell 37 — returns `Prompt` (`name`, `prompt`) only. Rather than carry a second
+schema and a `characters` column to serve one recovery branch, step 5's
+standalone call sends **every persisted portrait for the project** as a
+reference. At a hard cap of 2 characters those two sets are the same set in
+practice, and the chapter prompt already names its characters — cell 37 asks it
+to. Cell 44's selection logic exists to narrow a larger cast; we do not have one.
+
 There is no recovery code path. Step 3's `NULL` head is *already* its first-run
 branch, and the other three reuse it. Steps 2 and 4 genuinely require the book —
 their prompts read it ("use the descriptions from the book", "for each chapters
@@ -522,16 +594,32 @@ re-upload it under any circumstance.
 ### 7.7 Structured output and retries
 
 `response_format={"type":"text","mime_type":"application/json","schema": …}`,
-parsed from `output_text`, validated against a Pydantic model before anything is
-persisted.
+validated against a Pydantic model before anything is persisted.
 
-Retries are disabled at the client: `HttpRetryOptions(attempts=1, …)` — the
-notebook's own setting — plus a per-request timeout. There is no retry loop
-anywhere in our code. **The only path that re-invokes Gemini is a user `POST`.**
+**Where the JSON is read from is settled by the spike, not asserted here.** The
+notebook is internally inconsistent: cell 32 reads `interaction.output_text`;
+cells 37 and 41 read `interaction.steps[-1].content[0].text`. Both surfaces
+exist on `Interaction` in the installed SDK (`google-genai` 2.18.0 declares
+`output_text`, `output_image`, `output_audio`, `output_video` as fields). The
+spike (§14 step 2) determines which is populated for a structured response; the
+client then uses one accessor everywhere, with the other as a documented
+fallback.
+
+**Retries are disabled deliberately, as an override.** `google-genai` retries
+automatically unless told not to — `attempts` defaults to 5, and 0 or 1 means
+no retries. The client is therefore constructed with
+`HttpRetryOptions(attempts=1)` plus a per-request timeout, because §4.3 forbids
+auto-retry loops (§2, contradiction 5). There is no retry loop anywhere in our
+code. **The only path that re-invokes Gemini is a user `POST`.**
+
+`service_tier` is a notebook parameter serving its paid sections; the app omits
+it and takes the SDK default. The spike confirms this on a free-tier key.
 
 Model IDs come from environment variables and are recorded in `DECISIONS.md`.
-They are pinned at implementation time against AI Studio rather than asserted
-here; the notebook's own list has already turned over once.
+The notebook as run carries `IMAGE_MODEL_ID = "gemini-2.5-flash-image"` and
+`GEMINI_MODEL_ID = "gemini-3.1-flash-lite"`; those are the `.env.example`
+defaults, re-checked against AI Studio at implementation time since the
+notebook's own list has already turned over once.
 
 ### 7.8 Prompt constants, taken from the notebook
 
@@ -568,7 +656,7 @@ Ten REST endpoints plus one WebSocket endpoint.
 | `GET` | `/api/session` | current user or 401 — restores identity on app boot |
 | `DELETE` | `/api/session` | sign out |
 | `POST` | `/api/projects` | `{title, book_text}` → writes `book.txt`, inserts `CREATED/IDLE`. **No Gemini call** |
-| `GET` | `/api/projects` | list rows: `id, title, created_at, status, current_step, display_status, is_interrupted` |
+| `GET` | `/api/projects` | list rows: `id, title, created_at, status, current_step, display_status, needs_attention, is_interrupted` |
 | `GET` | `/api/projects/{id}` | full project view — the REST bootstrap read |
 | `GET` | `/api/projects/{id}/book` | book text, from disk |
 | `POST` | `/api/projects/{id}/run` | `{step, style?}` → **202** + project view, or **409** + project view |
@@ -796,9 +884,27 @@ response is always to refetch backend truth.
 ### 10.3 Components
 
 `App` (routing, session bootstrap) · `SignIn` · `ProjectList` / `ProjectRow` /
-`EmptyState` · `NewProject` (title, dropzone via `FileReader`, textarea) ·
-`ProjectDetail` · `Stepper` · `StepPanel` · `BookTextPanel` · `StylePanel` ·
-`CharacterCard` / `ChapterCard` · `useProjectSocket`.
+`EmptyState` · `NewProject` · `ProjectDetail` · `Stepper` · `StepPanel` ·
+`BookTextPanel` · `StylePanel` · `CharacterCard` / `ChapterCard` ·
+`useProjectSocket`.
+
+Three §4.4 requirements are named explicitly here so they cannot be lost between
+the design and the plan:
+
+- **`NewProject` implements both input paths.** A textarea for pasted text, and a
+  `.txt` file input read with `FileReader.readAsText` whose contents populate
+  that same textarea (`app-demo.html:355`). Both submit through the one
+  `{title, book_text}` call (§8). Validation requires a non-empty title and
+  non-empty book text whichever path produced it.
+- **`ProjectRow` renders the five-step progress indicator.** Five segments,
+  filled for each completed step, derived from `status` via the ordered `STEPS`
+  list exactly as the stepper is (`app-demo.html:556`). It sits alongside the
+  status pill and the `needs_attention` warning affordance (§4.2).
+- **Loading, error and empty states exist on every screen.** `ProjectList`:
+  skeleton while the fetch is in flight, `EmptyState` at zero projects, error
+  state with a retry affordance. `ProjectDetail`: skeleton while `GET` is in
+  flight, error state with a retry affordance, and `BookTextPanel`'s own loading
+  state on first expand.
 
 Sign out lives in the app shell header, present on every authenticated screen.
 
@@ -895,7 +1001,7 @@ Every row is executable evidence against `FakeGeminiClient`.
 | 11 | Late-step failure preserves earlier outputs | §4.3 | style, characters, portraits intact; retry calls **only** the failed step |
 | 12 | Partial portrait failure | §4.3, §4.4 | portrait 1 persisted; retry calls character 1 **zero** times, character 2 once |
 | 13 | Stale `server_run_id` | §4.3 | `is_interrupted` surfaces through the API; recovery is the **normal Retry command** |
-| 14 | Task cancellation | §4.3 | cancelled task leaves the step `FAILED`, never permanently `RUNNING` |
+| 14 | Task cancellation | §4.3, §6.3 | a cancelled task leaves the step `FAILED` and re-raises `CancelledError` — never `RUNNING` under the current `server_run_id`; a cancellation arriving after the run was taken over writes nothing |
 | 15 | Context expiry → Retry | §4.3 | expiry run records **one** call then `FAILED` with the head nulled; retry makes a standalone call, **re-uploading the book for steps 2/4 and not for 3/5** |
 | 16 | Ownership isolation | §4.1 | user B blocked from the project view, the artifact bytes, **and** the socket (1008) |
 | 17 | Reconnect and the GET→subscribe gap | §9.3 | state changing between `GET` and subscribe still reaches the client; reconnect yields current persisted truth |
@@ -942,6 +1048,9 @@ never through Gemini output.
 | **Detail loading** | skeleton while `GET` is in flight — §5.4 names loading |
 | Book panel loading | lazy fetch on first expand shows a loading state |
 | ProjectList empty + populated | §5.4 names empty |
+| **ProjectList progress indicator** | five segments, filled count equals completed steps — §4.4 |
+| **NewProject paste path** | pasted text submits `{title, book_text}` — §4.4 |
+| **NewProject `.txt` path** | a chosen file's contents populate the text and submit identically — §4.4 |
 | Socket disconnected | staleness indicator, **not** a pipeline failure |
 | `/run` → 409 | renders current state, not an error |
 | Fetch failure | retry affordance; **no invented `FAILED`** |
@@ -951,8 +1060,9 @@ a three-character fixture would encode a state that cannot exist.
 
 **WebSocket** — FastAPI's `TestClient` provides an in-process WebSocket client,
 so subscribe, per-item update, two-client fan-out, ownership rejection,
-disconnect/reconnect, and **"a connection whose send raises does not affect the
-step"** are all ordinary integration tests. No network harness, no E2E.
+disconnect/reconnect, **"a connection whose send raises does not affect the
+step"**, and **"two viewers on one running project cause zero extra Gemini
+calls"** are all ordinary integration tests. No network harness, no E2E.
 
 ### 11.4 Deliberately not tested
 
@@ -1002,7 +1112,7 @@ referenced from `TESTING.md`.
 | Project list not live | Its pill is stale until navigation |
 | No `fsync` | Power-loss durability; future work |
 | `SameSite=Lax` | Sufficient local-only; would need revisiting if hosted |
-| Synchronous SQLite on the event loop | Microsecond blocking — invisible at one user (§4.5) |
+| Synchronous SQLite on the event loop | Microsecond blocking — invisible at one user (§4.4) |
 | WebSocket disconnect | Screen may be stale until reconnect or manual refresh; durable state never affected |
 
 ---
@@ -1032,7 +1142,7 @@ Intentionally excluded from this submission:
 |---|---|
 | **0** | **Run notebook steps 1–5 in Colab** — mandatory per §03 and §09.1, before any app code |
 | 1 | Repo skeleton, `start.sh`, `test.sh`, `.env.example`, `CLAUDE.md` — harness first, per §09.3 |
-| **2** | **Gemini contract spike (throwaway)** — verify `output_text` vs `steps[-1]`, image extraction, `maxItems` enforcement, multi-part input with `response_format`. `FakeGeminiClient` then models a **verified** contract |
+| **2** | **Gemini contract spike (throwaway)** — verify `output_text` vs `steps[-1].content[0].text`, image extraction (`output_image` vs walking `steps`), `maxItems` enforcement, multi-part input with `response_format`, `document` parts from a `files.upload` URI, `previous_interaction_id` chaining, `system_instruction` on a standalone image call, the one-attempt retry configuration, and omitting `service_tier`. `FakeGeminiClient` then models a **verified** contract |
 | 3 | Schema, `store.py`, `read_project_view` |
 | 4 | Transition function + tests — the core invariant, early |
 | 5 | Identity and session REST |
@@ -1095,6 +1205,24 @@ it would be the manufactured evidence §2.3 penalizes. The real ones:
   nothing.
 - **The realtime DTO dependency contradiction** — `realtime.py` was claimed
   dependency-free while building a project DTO.
+- **The false claim about the notebook's retry configuration** — the design
+  argued that no-auto-retry "matches the notebook" and was therefore not an
+  override at all. Two checks broke it: `google-genai` retries **5 times by
+  default** (`HttpRetryOptions.attempts`: *"If not specified, default to 5"*),
+  and `note.md` shows the `attempts=1` in our notebook copy is our own edit made
+  while running it. The design was citing our own change back at us as
+  independent justification. Rewritten as what it is — a deliberate override
+  required by §4.3.
+- **The invented fourth status pill** — a *Needs attention* pill was added for
+  failed and interrupted projects, replacing §4.4's named vocabulary in the one
+  place the assessment is explicit about wording. The real concern was kept as a
+  separate `needs_attention` flag rendered beside the pill.
+- **"Idempotent" step handlers** — the handlers were described as idempotent
+  when they are only resume-aware; the word contradicted the crash boundary the
+  same document had just drawn in §5.5.
+
+That is more override material than §2.3's minimum of three. Pick the strongest
+and write them in full rather than listing all of them thinly.
 
 Close the file with the required one-more-day answer.
 
