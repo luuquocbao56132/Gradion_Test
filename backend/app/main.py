@@ -43,10 +43,10 @@ def create_app(*, settings: Settings | None = None, gemini=None, registry=None) 
     return app
 
 
-# NOTE: no module-level `app = create_app()` here. `_build_gemini` imports
-# `app.gemini.real.RealGeminiClient`, which does not exist until Task 34.
-# A module-level call would execute at import time, so importing `app.main`
-# from conftest.py would raise ModuleNotFoundError and block every task from
-# here to 33. Task 34 adds the module-level instance once RealGeminiClient
-# exists; until then, start.sh cannot run the server, which is expected since
-# no task before 35 runs it.
+def __getattr__(name: str):
+    """Lazy `app.main:app` for uvicorn (start.sh). A plain module-level
+    create_app() would run at import time - and conftest.py imports this module
+    in every test run, where there is no .env and no real key."""
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
