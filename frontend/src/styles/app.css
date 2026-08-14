@@ -71,6 +71,17 @@
 .project-row .progress-mini .seg { display: inline-block; width: 18px; height: 4px; border-radius: 2px; background: var(--border-1); flex-shrink: 0; }
 .project-row .progress-mini .seg.on { background: var(--grad-orange); }
 
+/* Sits beside the status pill, never replaces it: the assessment fixes the pill
+   vocabulary at Draft / In progress / Done, so failure and interruption need
+   their own affordance. Nothing in app-demo.html corresponds to this, because
+   the demo never fails. */
+.attention-flag {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  font-size: 12px; font-weight: 600; color: var(--grad-orange-deep);
+  background: var(--bg-accent-soft); border-radius: var(--r-pill);
+  padding: 5px 10px; white-space: nowrap;
+}
+
 /* ---- shared state blocks (StateMessage) ---- */
 .state-block { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-5); color: var(--grad-ink-2); font-size: 14px; }
 .state-block.error { flex-direction: column; align-items: flex-start; gap: var(--sp-3); border: 1px solid var(--border-2); border-radius: var(--r-3); background: #fff; }

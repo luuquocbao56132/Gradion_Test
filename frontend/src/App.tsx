@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import AppShell from './components/AppShell';
+import ProjectList from './components/ProjectList';
 import SignIn from './components/SignIn';
 import StateMessage from './components/StateMessage';
 import { useSession } from './hooks/useSession';
@@ -35,7 +36,10 @@ export default function App() {
 
   return (
     <AppShell session={session} onSignOut={signOut} onHome={() => navigate('#/projects')}>
-      {route.name === 'list' && <p>Projects</p>}
+      {route.name === 'list' && (
+        <ProjectList onOpen={(id) => navigate(`#/projects/${id}`)}
+                     onNew={() => navigate('#/projects/new')} />
+      )}
       {route.name === 'new' && <p>New project</p>}
       {route.name === 'detail' && <p>Project {route.id}</p>}
     </AppShell>
