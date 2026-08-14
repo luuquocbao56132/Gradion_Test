@@ -24,6 +24,14 @@ export default function StepPanel({ project, onRun, busy }: Props) {
   }
 
   const label = STEP_LABELS[step];
+  const styleValue = step === 'STYLE' && style.trim() ? style.trim() : undefined;
+  const styleField = step === 'STYLE' ? (
+    <div className="gd-field">
+      <label htmlFor="style-input">Art style (optional)</label>
+      <input id="style-input" value={style} onChange={(e) => setStyle(e.target.value)}
+             placeholder="Leave blank to let Gemini choose a style based on your book" />
+    </div>
+  ) : null;
 
   // Interrupted is checked before Running: a live spinner on a step whose
   // process is gone would be a lie (design 10.4).
@@ -37,8 +45,9 @@ export default function StepPanel({ project, onRun, busy }: Props) {
           Nothing before it was affected — everything already generated is saved.
           Retrying is safe.
         </p>
+        {styleField}
         <button type="button" className="gd-btn gd-btn-secondary" disabled={busy}
-                onClick={() => onRun(step)}>
+                onClick={() => onRun(step, styleValue)}>
           Retry {label}
         </button>
       </section>
@@ -54,8 +63,9 @@ export default function StepPanel({ project, onRun, busy }: Props) {
         <p className="help">
           Only this step failed. Everything already generated is saved and untouched.
         </p>
+        {styleField}
         <button type="button" className="gd-btn gd-btn-secondary" disabled={busy}
-                onClick={() => onRun(step)}>
+                onClick={() => onRun(step, styleValue)}>
           Retry {label}
         </button>
       </section>
@@ -81,20 +91,13 @@ export default function StepPanel({ project, onRun, busy }: Props) {
       <p className="status-line" role="status" aria-live="polite">
         Ready for the next step: <b>{label}</b>.
       </p>
-      {step === 'STYLE' && (
-        <div className="gd-field">
-          <label htmlFor="style-input">Art style (optional)</label>
-          <input id="style-input" value={style} onChange={(e) => setStyle(e.target.value)}
-                 placeholder="Leave blank to let Gemini choose a style based on your book" />
-        </div>
-      )}
+      {styleField}
       <p className="help">
         Reopening this page mid-step won’t fire a second request — it shows the same
         in-flight state until it lands.
       </p>
       <button type="button" className="gd-btn gd-btn-primary" disabled={busy}
-              onClick={() => onRun(step, step === 'STYLE' && style.trim()
-                ? style.trim() : undefined)}>
+              onClick={() => onRun(step, styleValue)}>
         Generate {label}
       </button>
     </section>
