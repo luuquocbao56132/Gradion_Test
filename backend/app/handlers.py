@@ -129,10 +129,53 @@ async def run_characters(ctx: StepContext) -> None:
                               text_interaction_id=result.interaction_id)
 
 
+# --------------------------------------------------------------------------
+# Step 3 - Portraits
+# --------------------------------------------------------------------------
+
+async def run_portraits(ctx: StepContext) -> None:
+    row, characters, _ = _load(ctx)
+    # The generation-loop bound: at most MAX_CHARACTERS regardless of how many
+    # rows exist, so persisted state above the cap cannot buy extra image calls.
+    capped = characters[:MAX_CHARACTERS]
+    pending = [c for c in capped if c["portrait_path"] is None]
+    if not pending:
+        return
+
+    head = row["image_interaction_id"]
+    if head is None:
+        seed = await ctx.gemini.create_image(
+            prompt=prompts.IMAGE_SEED.format(
+                title=row["title"],
+                style=prompts.STYLE_WRAPPER.format(style=row["style_text"] or ""),
+                rules=prompts.RULES),
+            reference_images=_reference_images(ctx, capped, "portrait_path"))
+        head = seed.interaction_id
+
+    for character in pending:
+        result = await ctx.gemini.create_image(
+            prompt=prompts.PORTRAIT_INSTRUCTION.format(
+                name=character["name"], prompt=character["prompt"]),
+            previous_interaction_id=head)
+        path = files.save_portrait_bytes(ctx.settings.data_dir, ctx.project_id,
+                                         character["id"], result.data)
+        # File first, then the row - and the chain head moves with it, in one
+        # transaction. Either without the other breaks a mid-flight retry
+        # (design 3.3, 7.2).
+        with db.get_conn(ctx.settings) as conn:
+            store.save_portrait(conn, project_id=ctx.project_id,
+                                character_id=character["id"], portrait_path=path,
+                                image_interaction_id=result.interaction_id)
+        head = result.interaction_id
+        ctx.notify()
+
+
 async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None) -> None:
     if step == StepName.STYLE:
         await run_style(ctx, style=style)
     elif step == StepName.CHARACTERS:
         await run_characters(ctx)
+    elif step == StepName.PORTRAITS:
+        await run_portraits(ctx)
     else:
         raise NotImplementedError(step)   # Tasks 19-22 fill this in
