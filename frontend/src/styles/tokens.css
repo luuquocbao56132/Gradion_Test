@@ -1,0 +1,60 @@
+/* =========================================================================
+   Tokens — copied verbatim from app-demo.html (Gradion Design System /
+   design-system/tokens/colors_and_type.css). This is the assessment's
+   shipped visual floor; reusing it here is deliberate (spec 10.7).
+   ========================================================================= */
+:root {
+  --grad-orange:        #FF6B00;
+  --grad-orange-hover:  #E85F00;
+  --grad-orange-light:  #FFA861;
+  --grad-orange-pale:   #FFC391;
+  --grad-orange-deep:   #3A160A;
+
+  --grad-ink:           #231F20;
+  --grad-ink-body:      #434343;
+  --grad-ink-2:         #595959;
+  --grad-ink-3:         #919699;
+  --grad-line:          #BAB7B1;
+  --grad-paper:         #F2EEE7;
+  --grad-paper-2:       #F8F8F8;
+  --grad-white:         #FFFFFF;
+  --grad-black:         #1D1C1D;
+
+  --fg-1: var(--grad-ink); --fg-2: var(--grad-ink-2); --fg-3: var(--grad-ink-3);
+  --bg-1: var(--grad-white); --bg-2: var(--grad-paper); --bg-3: var(--grad-paper-2);
+  --bg-accent-soft: #FFEEDF;
+
+  --border-1: var(--grad-line);
+  --border-2: #E8E2E0;
+
+  --font-sans:    "Noto Sans", system-ui, sans-serif;
+  --font-display: "Noto Sans", system-ui, sans-serif;
+
+  --fs-h2: 32px; --fs-h3: 24px; --fs-h4: 18px; --fs-body: 16px; --fs-meta: 12px;
+  --lh-tight: 1.1; --lh-normal: 1.5; --lh-loose: 1.65;
+  --fw-medium: 500; --fw-semi: 600; --fw-bold: 700; --fw-black: 800;
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --sp-6: 32px; --sp-7: 48px; --sp-8: 64px; --sp-9: 96px;
+
+  --r-0: 0px; --r-1: 4px; --r-2: 8px; --r-3: 12px; --r-4: 16px; --r-pill: 999px;
+
+  --shadow-card: 0 2px 6px rgba(35,31,32,0.06), 0 1px 2px rgba(35,31,32,0.04);
+  --shadow-pop:  0 8px 24px rgba(35,31,32,0.10), 0 2px 6px rgba(35,31,32,0.06);
+
+  --ease-standard: cubic-bezier(.2,.7,.2,1);
+  --dur-fast: 120ms; --dur-base: 200ms; --dur-slow: 320ms;
+
+  --content-max: 1100px;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; font-family: var(--font-sans); font-size: var(--fs-body); line-height: var(--lh-normal);
+  color: var(--fg-1); background: var(--bg-3); -webkit-font-smoothing: antialiased;
+}
+h1,h2,h3,h4,h5 { font-family: var(--font-display); color: var(--fg-1); font-weight: var(--fw-bold); line-height: var(--lh-tight); margin: 0 0 var(--sp-4); }
+h2 { font-size: var(--fs-h2); } h3 { font-size: var(--fs-h3); font-weight: var(--fw-semi); } h4 { font-size: var(--fs-h4); }
+p { margin: 0 0 var(--sp-4); }
+.meta { font-size: var(--fs-meta); color: var(--fg-3); }
+button { font-family: inherit; }
