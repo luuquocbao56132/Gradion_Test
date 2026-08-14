@@ -296,6 +296,87 @@ build its test fixture from `google.genai._gaos.lib.compat_errors.BadRequestErro
 ideally `NotFoundError` too, for the unexercised-but-kept 404 branch), not
 `google.genai.errors.ClientError`.
 
+#### A more fundamental problem one level up: the catch clause itself cannot match
+
+The two defects above are real but not the root cause. Task 34's planned `_create()`
+does:
+
+```python
+except errors.APIError as exc:        # errors = google.genai.errors
+    raise self._translate(exc) from exc
+```
+
+This `except` clause **never matches a real interactions-endpoint error at all** —
+confirmed by static inspection of the installed package (no live calls; this is
+reading local `.venv` source and `__mro__`, same as the earlier Q9 static analysis).
+The MRO of the exception this spike actually observed:
+
+```
+BadRequestError.__mro__ = BadRequestError → APIStatusError → APIError
+                          → GeminiNextGenAPIClientError → Exception
+
+issubclass(gaos.BadRequestError, google.genai.errors.APIError) → False
+```
+
+**The same-name trap:** `google.genai._gaos.lib.compat_errors` defines its own class
+also named `APIError` — entirely disjoint from, and not a subclass of,
+`google.genai.errors.APIError`, the public one Task 34's `_translate` would import.
+Same name, different module, no inheritance relationship between them
+(`issubclass(gaos.APIError, errors.APIError)` is also `False`). A careful reader
+skimming `except errors.APIError` will naturally assume the public `APIError` is what
+gets raised by `interactions.create()` — it is not. Every real error from this spike
+(`PermissionDeniedError`, `BadRequestError`, all confirmed raised live above) is a
+subclass of the **private** `_gaos.lib.compat_errors.APIError`, not the public one.
+
+**All three planned things are wrong and must change together — fixing any subset
+still ships a dead recovery path:**
+1. The catch clause (`except errors.APIError`) — never matches, so `_translate` is
+   never even called against a real error.
+2. The predicate inside `_translate` (`code == 404`) — even if the catch clause were
+   fixed, `.code` doesn't exist on this hierarchy (confirmed above), so the predicate
+   would still never fire.
+3. The test fixture (`google.genai.errors.ClientError(404, ...)`) — constructs a
+   third, also-wrong class, so the test suite would keep passing green throughout,
+   proving nothing about production behaviour.
+
+**Prescribed shape (ruling R17).** Task 34 must **not** import from the private
+`_gaos` path — reaching into a module named with a leading underscore is fragile
+across SDK versions and is exactly the kind of coupling a throwaway spike exists to
+warn against, not encode into production. Instead, catch broadly and discriminate by
+duck-typing on the attributes this spike confirmed the real exception carries
+(`status_code`, `body`), not by class identity:
+
+```python
+try:
+    return await self._client.aio.interactions.create(**kwargs)
+except GeminiError:
+    raise                      # our own types pass through untouched
+except Exception as exc:
+    raise self._translate(exc, had_previous_interaction=prev is not None) from exc
+```
+
+with `_translate` reading `getattr(exc, "status_code", None)` and
+`getattr(exc, "body", None)`, applying the predicate documented above (gated on
+`had_previous_interaction`, checking `status_code == 404` or `status_code == 400` with
+`body["error"]["code"] == "invalid_request"`), and defaulting to a generic
+`GeminiError` for everything else.
+
+**Residual risk, stated plainly:** a broad `except Exception` could mask a genuine
+programming error (a bug in our own calling code, not a provider error) as if it were
+a Gemini API failure. This is mitigated two ways: `GeminiError` subclasses are
+re-raised untouched *before* the broad catch, so our own typed errors are never
+swallowed or re-wrapped; and `_translate` defaults to a generic `GeminiError` rather
+than silently succeeding or misclassifying, so an unrecognised exception still fails
+the step loudly (`GEMINI_ERROR` → `FAILED` → user-triggered Retry) instead of being
+absorbed.
+
+**Test fixture, restated:** must construct the **real** exception class —
+`google.genai._gaos.lib.compat_errors.BadRequestError` (and `NotFoundError` for the
+kept-but-unobserved 404 branch) — not `google.genai.errors.ClientError`. A fixture
+built from the wrong class exercises none of the actual `except`/`isinstance`/
+attribute-access logic the real client will hit, so it cannot catch any of the three
+defects above regressing.
+
 ## Decisions
 
 - **`create_text` (Q1/Q2):** use `interaction.output_text` as the primary accessor
