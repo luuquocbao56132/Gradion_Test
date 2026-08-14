@@ -11,7 +11,7 @@ durable state says it is, without repeating a Gemini call.
 
 - **Python 3.12+**
 - **Node 20+**
-- A **Gemini API key** (free tier works) from <https://aistudio.google.com/apikey>
+- A **Gemini API key** (free tier works) from [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 - On **Windows**: Git Bash — `start.sh` and `test.sh` are POSIX `sh` scripts
 
 ## Setup
@@ -29,7 +29,7 @@ npm install --prefix frontend
 ./start.sh
 ```
 
-Backend on `http://127.0.0.1:8000`, frontend on <http://localhost:5173>.
+Backend on `http://127.0.0.1:8000`, frontend on [http://localhost:5173](http://localhost:5173).
 
 ## Test
 
@@ -40,16 +40,31 @@ Backend on `http://127.0.0.1:8000`, frontend on <http://localhost:5173>.
 Runs pytest (backend) and vitest (frontend). The suites mock Gemini; no key or
 network needed.
 
+### On Windows
+
+`start.sh` and `test.sh` are POSIX `sh`. Run them from **Git Bash** — from
+PowerShell or CMD, `./start.sh` just opens the file in an editor. If you would
+rather stay in PowerShell or CMD, use the wrappers:
+
+```
+.\start.cmd
+.\test.cmd
+```
+
+They locate Git Bash and hand the script over. They deliberately do not use plain
+`bash`, which on most Windows machines resolves to WSL's bash — that sees a
+different filesystem and cannot use `.venv\Scripts`.
+
 ## Environment variables
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `GEMINI_API_KEY` | — | Your key. Never committed; `.env` is gitignored. |
-| `GEMINI_TEXT_MODEL` | `gemini-3.1-flash-lite` | Text model. |
-| `GEMINI_IMAGE_MODEL` | `gemini-2.5-flash-image` | Image model (Nano Banana family). |
-| `DATA_DIR` | `./data` | Where `app.db` and per-project artifacts live. |
-| `USE_FAKE_GEMINI` | `0` | `1` runs the app against the in-repo fake instead of the real API. |
-| `GEMINI_TIMEOUT_SECONDS` | `180` | Per-request timeout; image calls are the slow ones. |
+| Variable                   | Default                    | Meaning                                                              |
+| -------------------------- | -------------------------- | -------------------------------------------------------------------- |
+| `GEMINI_API_KEY`         | —                         | Your key. Never committed;`.env` is gitignored.                    |
+| `GEMINI_TEXT_MODEL`      | `gemini-3.1-flash-lite`  | Text model.                                                          |
+| `GEMINI_IMAGE_MODEL`     | `gemini-2.5-flash-image` | Image model (Nano Banana family).                                    |
+| `DATA_DIR`               | `./data`                 | Where`app.db` and per-project artifacts live.                      |
+| `USE_FAKE_GEMINI`        | `0`                      | `1` runs the app against the in-repo fake instead of the real API. |
+| `GEMINI_TIMEOUT_SECONDS` | `180`                    | Per-request timeout; image calls are the slow ones.                  |
 
 The model IDs are the ones the notebook was run with. Model IDs turn over —
 re-check them against AI Studio if a call fails with an unknown-model error.
