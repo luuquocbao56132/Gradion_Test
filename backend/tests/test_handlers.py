@@ -329,3 +329,69 @@ async def test_nothing_left_to_generate_makes_no_calls_at_all(
     await run_step(StepName.PORTRAITS, with_characters)
 
     assert fake_gemini.calls == []
+
+
+# --------------------------------------------------------------------------
+# Step 4 - Chapters
+# --------------------------------------------------------------------------
+
+async def test_chapters_chain_off_the_characters_interaction_not_the_image_chain(
+        conn, with_characters, fake_gemini):
+    """Step 4 chains off the text head, which after step 2 IS the characters
+    interaction - so no history table is needed (design 7.1)."""
+    conn.execute("UPDATE projects SET image_interaction_id='i-img-2' WHERE id=?",
+                 (with_characters.project_id,))
+
+    await run_step(StepName.CHAPTERS, with_characters)
+
+    assert [c.kind for c in fake_gemini.calls] == ["structured"]
+    call = fake_gemini.calls[0]
+    assert call.previous_interaction_id == "i-chars"
+    assert call.previous_interaction_id != "i-img-2"
+    assert call.prompt == prompts.CHAPTERS_INSTRUCTION
+    assert call.max_items == 1
+    assert call.document_uri is None
+
+
+async def test_one_chapter_is_persisted_with_the_new_text_head(conn, with_characters):
+    await run_step(StepName.CHAPTERS, with_characters)
+
+    rows = store.list_chapters(conn, with_characters.project_id)
+    assert [r["name"] for r in rows] == ["Chapter One"]
+    assert rows[0]["illustration_path"] is None
+    assert project_row(conn, with_characters)["text_interaction_id"] != "i-chars"
+
+
+async def test_more_than_one_chapter_fails_validation(conn, with_characters, fake_gemini):
+    fake_gemini.extra_items = 2
+
+    with pytest.raises(InvalidStructuredOutput, match="at most 1"):
+        await run_step(StepName.CHAPTERS, with_characters)
+
+    assert store.list_chapters(conn, with_characters.project_id) == []
+
+
+async def test_a_null_text_head_rebuilds_from_style_and_the_character_prompts(
+        conn, with_characters, fake_gemini):
+    conn.execute("UPDATE projects SET text_interaction_id = NULL WHERE id = ?",
+                 (with_characters.project_id,))
+
+    await run_step(StepName.CHAPTERS, with_characters)
+
+    assert [c.kind for c in fake_gemini.calls] == ["upload", "structured"]
+    call = fake_gemini.calls[1]
+    assert call.previous_interaction_id is None
+    assert call.document_uri is not None       # 'for each chapters of the book'
+    assert "Warm watercolour" in call.prompt
+    assert "a stout toad" in call.prompt        # characters carried forward
+    assert "a trim rat" in call.prompt
+
+
+async def test_chapters_already_persisted_are_not_regenerated(
+        conn, with_characters, fake_gemini):
+    store.save_chapters(conn, with_characters.project_id, [("Existing", "p")],
+                        text_interaction_id="i-old")
+
+    await run_step(StepName.CHAPTERS, with_characters)
+
+    assert fake_gemini.calls == []

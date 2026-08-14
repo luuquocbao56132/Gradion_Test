@@ -170,6 +170,37 @@ async def run_portraits(ctx: StepContext) -> None:
         ctx.notify()
 
 
+# --------------------------------------------------------------------------
+# Step 4 - Chapters
+# --------------------------------------------------------------------------
+
+async def run_chapters(ctx: StepContext) -> None:
+    row, characters, chapters = _load(ctx)
+    if chapters:
+        return
+
+    head = row["text_interaction_id"]
+    if head is not None:
+        prompt = prompts.CHAPTERS_INSTRUCTION
+        document_uri = None
+    else:
+        prompt = prompts.chapters_standalone(
+            row["style_text"] or "",
+            [c["prompt"] for c in characters[:MAX_CHARACTERS]])
+        document_uri = await ctx.gemini.upload_book(
+            files.book_path(ctx.settings.data_dir, ctx.project_id))
+
+    result = await ctx.gemini.create_structured(
+        prompt=prompt, previous_interaction_id=head, document_uri=document_uri,
+        item_schema=PROMPT_ITEM_SCHEMA, max_items=MAX_CHAPTERS)
+    items = _validated(result.items, MAX_CHAPTERS, "chapters")
+
+    with db.get_conn(ctx.settings) as conn:
+        store.save_chapters(conn, ctx.project_id,
+                            [(i["name"], i["prompt"]) for i in items],
+                            text_interaction_id=result.interaction_id)
+
+
 async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None) -> None:
     if step == StepName.STYLE:
         await run_style(ctx, style=style)
@@ -177,5 +208,7 @@ async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None
         await run_characters(ctx)
     elif step == StepName.PORTRAITS:
         await run_portraits(ctx)
+    elif step == StepName.CHAPTERS:
+        await run_chapters(ctx)
     else:
         raise NotImplementedError(step)   # Tasks 19-22 fill this in
