@@ -123,7 +123,9 @@
 @keyframes gd-spin { to { transform: rotate(360deg); } }
 .gen-caption { font-size: 11px; color: var(--grad-ink-2); margin-top: var(--sp-2); text-align: center; padding: 0 8px; }
 
-.step-panel { background: #fff; border: 1px solid var(--border-2); border-radius: var(--r-3); padding: var(--sp-5); min-height: 132px; }
+/* Reserves height so switching between Ready, Running and Failed does not
+   jump the layout. */
+.step-panel { background: #fff; border: 1px solid var(--border-2); border-radius: var(--r-3); padding: var(--sp-5); min-height: 172px; }
 .step-panel .status-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--grad-ink-2); margin-bottom: var(--sp-4); min-height: 20px; }
 .step-panel .status-line .spinner { width: 16px; height: 16px; border-width: 2px; }
 .step-panel p.help { font-size: 12px; color: var(--grad-ink-3); margin: 0; }
@@ -173,7 +175,8 @@ footer.app-footer a { color: var(--grad-ink-3); font-size: 11px; text-decoration
 .gd-btn-primary:hover:not(:disabled), .gd-btn-secondary:hover:not(:disabled) { transform: translateY(-1px); }
 
 /* Keyboard focus — visible ring, never shown for mouse/touch */
-a:focus-visible, button:focus-visible, .project-row:focus-visible, .dropzone:focus-visible {
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible,
+.project-row:focus-visible, .dropzone:focus-visible {
   outline: 2px solid var(--grad-orange); outline-offset: 2px; border-radius: var(--r-1);
 }
 
@@ -190,5 +193,21 @@ a:focus-visible, button:focus-visible, .project-row:focus-visible, .dropzone:foc
 }
 
 /* Fixed aspect-ratio art slots so an image landing never reflows the page. */
-.entity-card .art { aspect-ratio: 3 / 4; }
+.entity-card .art { aspect-ratio: 3 / 4; overflow: hidden; }
 .entity-card .art.chapter { aspect-ratio: 16 / 10; }
+.entity-card .art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.entity-grid.single { grid-template-columns: 1fr; }
+.book-full { white-space: pre-wrap; max-height: 40vh; overflow-y: auto;
+             font-size: 13px; line-height: var(--lh-loose); }
+
+/* The connection badge lives in a fixed-height slot: going live removes the
+   badge, and the slot is what keeps that from jumping the layout. */
+.connection-slot { min-height: 32px; margin-bottom: var(--sp-3); }
+.connection-badge { display: inline-flex; align-items: center; gap: var(--sp-3);
+                    margin: 0; font-size: 13px; color: var(--grad-ink-2); }
+
+@media (max-width: 720px) {
+  .entity-grid { grid-template-columns: 1fr; }
+  .project-row { flex-wrap: wrap; }
+}

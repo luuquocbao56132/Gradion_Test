@@ -136,7 +136,9 @@ export default function ProjectDetail({ projectId, onBack }: {
       <p className="meta">Created {new Date(project.created_at).toLocaleDateString()}</p>
 
       <Stepper project={project} />
-      <ConnectionBadge state={connection} onRefresh={load} />
+      <div className="connection-slot">
+        <ConnectionBadge state={connection} onRefresh={load} />
+      </div>
 
       {transportError && (
         <p className="banner" role="alert">
