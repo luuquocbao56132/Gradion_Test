@@ -19,7 +19,7 @@ function parseRoute(hash: string): Route {
 export function navigate(hash: string) { window.location.hash = hash; }
 
 export default function App() {
-  const { session, status, error, signIn, signOut, retry } = useSession();
+  const { session, status, error, isSigningIn, signIn, signOut, retry } = useSession();
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
 
   useEffect(() => {
@@ -33,7 +33,7 @@ export default function App() {
     return <StateMessage kind="error" message={error ?? 'Could not reach the server.'}
                          onRetry={retry} />;
   }
-  if (!session) return <SignIn onSubmit={signIn} error={error} busy={false} />;
+  if (!session) return <SignIn onSubmit={signIn} error={error} busy={isSigningIn} />;
 
   return (
     <AppShell session={session} onSignOut={signOut} onHome={() => navigate('#/projects')}>

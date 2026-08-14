@@ -13,6 +13,7 @@ export function useSession() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [status, setStatus] = useState<SessionStatus>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
 
   const bootstrap = useCallback(async () => {
     setStatus('loading');
@@ -29,11 +30,14 @@ export function useSession() {
 
   const signIn = useCallback(async (name: string, email: string) => {
     setError(null);
+    setIsSigningIn(true);
     try {
       setSession(await api.createSession(name, email));
       window.location.hash = '#/projects';
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setIsSigningIn(false);
     }
   }, []);
 
@@ -43,5 +47,5 @@ export function useSession() {
     window.location.hash = '#/';
   }, []);
 
-  return { session, status, error, signIn, signOut, retry: bootstrap };
+  return { session, status, error, isSigningIn, signIn, signOut, retry: bootstrap };
 }
