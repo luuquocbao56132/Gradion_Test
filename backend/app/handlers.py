@@ -201,6 +201,50 @@ async def run_chapters(ctx: StepContext) -> None:
                             text_interaction_id=result.interaction_id)
 
 
+# --------------------------------------------------------------------------
+# Step 5 - Illustrations
+# --------------------------------------------------------------------------
+
+async def run_illustrations(ctx: StepContext) -> None:
+    row, characters, chapters = _load(ctx)
+    capped = chapters[:MAX_CHAPTERS]
+    pending = [c for c in capped if c["illustration_path"] is None]
+    if not pending:
+        return
+
+    head = row["image_interaction_id"]
+    if head is not None:
+        seed = await ctx.gemini.create_image(prompt=prompts.CHAPTER_SEED,
+                                             previous_interaction_id=head)
+        head = seed.interaction_id
+        references: list[ReferenceImage] = []
+    else:
+        # Standalone reconstruction, notebook cells 39-44. Never re-uploads the
+        # book: step 5's prompt is built entirely from persisted state.
+        references = _reference_images(ctx, characters[:MAX_CHARACTERS], "portrait_path")
+
+    for chapter in pending:
+        if head is not None:
+            result = await ctx.gemini.create_image(
+                prompt=prompts.ILLUSTRATION_INSTRUCTION.format(
+                    name=chapter["name"], prompt=chapter["prompt"]),
+                previous_interaction_id=head)
+        else:
+            result = await ctx.gemini.create_image(
+                prompt=prompts.ILLUSTRATION_STANDALONE.format(
+                    name=chapter["name"], prompt=chapter["prompt"]),
+                reference_images=references,
+                system_instruction=prompts.RULES)
+        path = files.save_illustration_bytes(ctx.settings.data_dir, ctx.project_id,
+                                             chapter["id"], result.data)
+        with db.get_conn(ctx.settings) as conn:
+            store.save_illustration(conn, project_id=ctx.project_id,
+                                    chapter_id=chapter["id"], illustration_path=path,
+                                    image_interaction_id=result.interaction_id)
+        head = result.interaction_id
+        ctx.notify()
+
+
 async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None) -> None:
     if step == StepName.STYLE:
         await run_style(ctx, style=style)
@@ -210,5 +254,7 @@ async def run_step(step: StepName, ctx: StepContext, *, style: str | None = None
         await run_portraits(ctx)
     elif step == StepName.CHAPTERS:
         await run_chapters(ctx)
+    elif step == StepName.ILLUSTRATIONS:
+        await run_illustrations(ctx)
     else:
-        raise NotImplementedError(step)   # Tasks 19-22 fill this in
+        raise ValueError(f"Unknown step: {step}")

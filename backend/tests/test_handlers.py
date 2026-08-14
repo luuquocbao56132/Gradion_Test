@@ -395,3 +395,93 @@ async def test_chapters_already_persisted_are_not_regenerated(
     await run_step(StepName.CHAPTERS, with_characters)
 
     assert fake_gemini.calls == []
+
+
+# --------------------------------------------------------------------------
+# Step 5 - Illustrations
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def with_chapters(conn, with_characters, settings):
+    for row in store.list_characters(conn, with_characters.project_id):
+        path = files.save_portrait_bytes(settings.data_dir, with_characters.project_id,
+                                         row["id"], FakeGeminiClient.TINY_PNG)
+        store.save_portrait(conn, project_id=with_characters.project_id,
+                            character_id=row["id"], portrait_path=path,
+                            image_interaction_id="i-img-2")
+    store.save_chapters(conn, with_characters.project_id,
+                        [("Chapter One", "a sunlit river bank")],
+                        text_interaction_id="i-chaps")
+    return with_characters
+
+
+async def test_illustrations_seed_chapter_mode_off_the_last_portrait_then_draw(
+        conn, with_chapters, fake_gemini):
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    assert [c.kind for c in fake_gemini.calls] == ["image", "image"]
+    seed, draw = fake_gemini.calls
+    assert seed.prompt == prompts.CHAPTER_SEED
+    assert seed.previous_interaction_id == "i-img-2"     # continues the image chain
+    assert draw.prompt == prompts.ILLUSTRATION_INSTRUCTION.format(
+        name="Chapter One", prompt="a sunlit river bank")
+    assert draw.previous_interaction_id is not None
+    assert draw.reference_image_count == 0               # chained mode needs no refs
+
+
+async def test_the_illustration_lands_on_disk_and_completes_the_project_data(
+        conn, with_chapters, settings):
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    row = store.list_chapters(conn, with_chapters.project_id)[0]
+    assert row["illustration_path"] == \
+        f"projects/{with_chapters.project_id}/illustrations/{row['id']}.png"
+    assert files.absolute(settings.data_dir, row["illustration_path"]).exists()
+
+
+async def test_a_null_image_head_draws_standalone_with_the_portraits_as_references(
+        conn, with_chapters, fake_gemini):
+    """Notebook cells 39-44: reference images plus the rules as
+    system_instruction, and no chaining. Every persisted portrait is sent,
+    because at a cap of 2 that is the same set cell 44 would select (design 7.5)."""
+    conn.execute("UPDATE projects SET image_interaction_id = NULL WHERE id = ?",
+                 (with_chapters.project_id,))
+
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    assert [c.kind for c in fake_gemini.calls] == ["image"]
+    call = fake_gemini.calls[0]
+    assert call.previous_interaction_id is None
+    assert call.reference_image_count == 2
+    assert call.system_instruction == prompts.RULES
+    assert "a sunlit river bank" in call.prompt
+
+
+async def test_the_standalone_illustration_never_re_uploads_the_book(
+        conn, with_chapters, fake_gemini):
+    conn.execute("UPDATE projects SET image_interaction_id = NULL WHERE id = ?",
+                 (with_chapters.project_id,))
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+    assert not any(c.kind == "upload" for c in fake_gemini.calls)
+
+
+async def test_the_illustration_loop_is_bounded_at_one_chapter(
+        conn, with_chapters, fake_gemini):
+    conn.execute(
+        "INSERT INTO chapters (id, project_id, position, name, prompt) VALUES (?,?,?,?,?)",
+        (store.new_id(), with_chapters.project_id, 1, "Chapter Two", "the wild wood"))
+
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    drawn = [c for c in fake_gemini.calls if c.prompt and "wild wood" in c.prompt]
+    assert drawn == []
+
+
+async def test_an_existing_illustration_is_not_regenerated(conn, with_chapters, fake_gemini):
+    row = store.list_chapters(conn, with_chapters.project_id)[0]
+    store.save_illustration(conn, project_id=with_chapters.project_id, chapter_id=row["id"],
+                            illustration_path="projects/p/x.png", image_interaction_id="i")
+
+    await run_step(StepName.ILLUSTRATIONS, with_chapters)
+
+    assert fake_gemini.calls == []
