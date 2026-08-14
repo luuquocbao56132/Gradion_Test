@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
+import { useProjectSocket } from '../hooks/useProjectSocket';
 import type { ProjectView, StepName } from '../types';
 import BookTextPanel from './BookTextPanel';
+import ConnectionBadge from './ConnectionBadge';
 import EntityCard from './EntityCard';
 import StateMessage from './StateMessage';
 import StepPanel from './StepPanel';
@@ -64,6 +66,17 @@ export default function ProjectDetail({ projectId, onBack }: {
     };
   }, [load]);
 
+  // Replaces project state wholesale on every message. There is no client-side
+  // event-sourced state machine (design 9.1). The message's own project id is
+  // the guard: a frame from a socket that outlived its route can never publish
+  // into the current one.
+  const connection = useProjectSocket(projectId, (next: ProjectView) => {
+    if (!mounted.current || next.id !== currentProjectId.current) return;
+    // Socket truth postdates any in-flight GET or run outcome; seal them off.
+    truthGeneration.current += 1;
+    setProjectState({ projectId: next.id, value: next });
+  });
+
   const run = async (step: StepName, style?: string) => {
     const requestProjectId = projectId;
     const requestRunGeneration = ++runGeneration.current;
@@ -123,6 +136,7 @@ export default function ProjectDetail({ projectId, onBack }: {
       <p className="meta">Created {new Date(project.created_at).toLocaleDateString()}</p>
 
       <Stepper project={project} />
+      <ConnectionBadge state={connection} onRefresh={load} />
 
       {transportError && (
         <p className="banner" role="alert">

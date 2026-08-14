@@ -295,3 +295,14 @@ test('the detail composes progress and the persisted style beside the active ste
   expect(screen.getByText('Warm watercolour')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /generate characters/i })).toBeEnabled();
 });
+
+test('losing the socket never turns the project into a pipeline failure', async () => {
+  vi.spyOn(api, 'getProject').mockResolvedValue(project());
+  render(<ProjectDetail projectId="p1" onBack={vi.fn()} />);
+
+  expect(await screen.findByRole('button', { name: /generate characters/i })).toBeInTheDocument();
+  // No socket is connected in jsdom, so the hook is not live - and the panel
+  // still shows Ready, not Failed or Interrupted.
+  expect(screen.queryByText(/retry characters/i)).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
