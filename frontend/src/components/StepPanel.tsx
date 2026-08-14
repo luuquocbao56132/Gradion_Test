@@ -15,7 +15,9 @@ export default function StepPanel({ project, onRun, busy }: Props) {
   if (step === null) {
     return (
       <section className="step-panel">
-        <p className="status-line">✓ All 5 steps complete — nothing left to generate.</p>
+        <p className="status-line" role="status" aria-live="polite">
+          ✓ All 5 steps complete — nothing left to generate.
+        </p>
         <p className="help">
           This project is done. Reopen it any time; nothing here regenerates automatically.
         </p>

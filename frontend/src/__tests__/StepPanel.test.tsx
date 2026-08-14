@@ -122,7 +122,9 @@ test('Complete offers no action and says nothing regenerates', () => {
   render(<StepPanel project={project({ status: 'DONE', current_step: null,
                                        display_status: 'Done', completed_steps: 5 })}
                     onRun={vi.fn()} busy={false} />);
-  expect(screen.getByText(/all 5 steps complete/i)).toBeInTheDocument();
+  const status = screen.getByRole('status');
+  expect(status).toHaveTextContent(/all 5 steps complete/i);
+  expect(status).toHaveAttribute('aria-live', 'polite');
   expect(screen.queryByRole('button')).not.toBeInTheDocument();
 });
 
