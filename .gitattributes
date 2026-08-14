@@ -1,0 +1,6 @@
+# Normalise to LF in the repository.
+* text=auto
+
+# Shell scripts must keep LF on checkout or the shebang breaks under Git Bash
+# and POSIX sh (env: 'sh\r': No such file or directory).
+*.sh text eol=lf
