@@ -55,6 +55,18 @@ They locate Git Bash and hand the script over. They deliberately do not use plai
 `bash`, which on most Windows machines resolves to WSL's bash — that sees a
 different filesystem and cannot use `.venv\Scripts`.
 
+**Stopping it.** Press Ctrl+C. From CMD you will also get `Terminate batch job
+(Y/N)?` — answer `Y`. That prompt is unavoidable in a batch file, and answering
+it can kill the shell before any cleanup runs, so `start.sh` shuts down **by
+port** rather than by job id and clears both ports again on the next startup.
+Nothing is left listening either way.
+
+The port-based approach is not incidental: `npm run dev` spawns vite as a
+separate process that outlives the npm wrapper, and under Git Bash the shell's
+job ids are MSYS numbers rather than Windows PIDs, so neither `kill` nor
+`taskkill` can reach the real process. The listening port is the only handle
+that is correct on both platforms.
+
 ## Environment variables
 
 | Variable                   | Default                    | Meaning                                                              |

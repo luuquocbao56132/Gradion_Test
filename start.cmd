@@ -20,4 +20,14 @@ if not defined GITBASH (
   exit /b 1
 )
 
+echo Starting. Press Ctrl+C to stop, then answer Y to "Terminate batch job".
+echo Both servers are shut down by port, so nothing is left running either way.
+echo.
+
 "%GITBASH%" -lc "cd \"$(cygpath '%~dp0')\" && ./start.sh"
+
+REM Answering Y to CMD's prompt can kill this batch file before the line above
+REM returns, so this is a belt-and-braces sweep for the normal-exit case. The
+REM real guarantee is start.sh's own port-based cleanup, plus the fact that it
+REM clears both ports on startup.
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000,5173 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }" >nul 2>&1
