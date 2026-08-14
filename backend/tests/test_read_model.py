@@ -144,3 +144,65 @@ def test_saving_a_portrait_advances_the_image_head_in_the_same_write(conn, setti
     row = conn.execute("SELECT image_interaction_id FROM projects WHERE id=?", (pid,)).fetchone()
     assert row["image_interaction_id"] == "i-img-1"
     assert store.list_characters(conn, pid)[0]["portrait_path"] == "projects/p/portraits/c.png"
+
+
+def test_an_interrupted_run_never_shows_a_character_as_generating(conn, settings, project):
+    """A RUNNING row stamped by a process that is gone is not actually in flight;
+    nothing is generating, so every gap is merely pending (design 5.3)."""
+    _, pid = project
+    store.save_characters(conn, pid, [("Toad", "p1"), ("Rat", "p2")], text_interaction_id="i")
+    conn.execute(
+        "UPDATE projects SET status='CHARACTERS_GENERATED', step_state='RUNNING', "
+        "server_run_id='a-dead-process' WHERE id=?", (pid,))
+    v = view(conn, settings, project)
+    assert v.is_interrupted is True
+    assert [c.image_state for c in v.characters] == ["pending", "pending"]
+
+
+def test_replace_children_rolls_back_leaving_the_previous_set_untouched(conn, settings, project,
+                                                                        monkeypatch):
+    """Proves atomicity, not merely co-landing: the DELETE must not survive a
+    mid-write failure, or the previous set would be lost with nothing to replace it."""
+    _, pid = project
+    store.save_characters(conn, pid, [("A", "x"), ("B", "y")], text_interaction_id="i1")
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "new_id", boom)
+    with pytest.raises(RuntimeError):
+        store.save_characters(conn, pid, [("C", "z")], text_interaction_id="i2")
+
+    assert [c["name"] for c in store.list_characters(conn, pid)] == ["A", "B"]
+    assert conn.execute("SELECT text_interaction_id FROM projects WHERE id=?",
+                        (pid,)).fetchone()[0] == "i1"
+
+
+def test_save_artifact_rolls_back_leaving_neither_the_path_nor_the_head(conn, settings, project):
+    """Proves atomicity, not merely co-landing: if the head update fails, the
+    artifact path must not survive either, or a retry would skip work it never
+    actually finished (design 7.2)."""
+    _, pid = project
+    store.save_characters(conn, pid, [("Toad", "p1")], text_interaction_id="i")
+    cid = store.list_characters(conn, pid)[0]["id"]
+
+    class ExplodingConn:
+        """Forwards to the real connection, except the statement that moves the
+        chain head, which fails after the artifact write has already executed."""
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, params=()):
+            if "image_interaction_id" in sql:
+                raise RuntimeError("boom")
+            return self._real.execute(sql, params)
+
+    with pytest.raises(RuntimeError):
+        store.save_portrait(ExplodingConn(conn), project_id=pid, character_id=cid,
+                            portrait_path="projects/p/portraits/c.png",
+                            image_interaction_id="i-img")
+
+    assert store.list_characters(conn, pid)[0]["portrait_path"] is None
+    row = conn.execute("SELECT image_interaction_id FROM projects WHERE id=?",
+                       (pid,)).fetchone()
+    assert row["image_interaction_id"] is None

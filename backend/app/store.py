@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 
 from app.models import EntityView, Failure, ProjectListItem, ProjectView
 from app.steps import (
-    MAX_CHAPTERS,
-    MAX_CHARACTERS,
     ProjectStatus,
     StepName,
     StepState,
