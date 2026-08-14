@@ -1,5 +1,8 @@
+import importlib
+
 import pytest
 
+from app import steps
 from app.gemini import prompts
 from app.gemini.protocol import InvalidStructuredOutput, parse_items
 
@@ -55,6 +58,21 @@ def test_chapters_instruction_keeps_the_notebook_text_and_adds_the_cap():
         "happens in it. It should be a single image, not a multi-tiled page."
     )
     assert "at most 1" in prompts.CHAPTERS_INSTRUCTION
+
+
+def test_cap_instructions_follow_the_canonical_step_limits(monkeypatch):
+    """Changing the enforced caps must change the prompts sent to Gemini too."""
+    try:
+        with monkeypatch.context() as limits:
+            limits.setattr(steps, "MAX_CHARACTERS", 7)
+            limits.setattr(steps, "MAX_CHAPTERS", 5)
+            reloaded_prompts = importlib.reload(prompts)
+
+            assert "Return at most 7 characters." in reloaded_prompts.CHARACTERS_INSTRUCTION
+            assert "Return at most 5 chapter." in reloaded_prompts.CHAPTERS_INSTRUCTION
+    finally:
+        # Restoring the module matters because its constants are built at import time.
+        importlib.reload(prompts)
 
 
 def test_the_image_seed_takes_the_title_from_the_project():

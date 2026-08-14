@@ -7,6 +7,8 @@ our paraphrase of it (design 7.8).
 """
 from __future__ import annotations
 
+from app.steps import MAX_CHARACTERS, MAX_CHAPTERS
+
 # cell 27
 BOOK_INTRO = (
     "Here's a book, to illustrate using Nano Banana. "
@@ -42,7 +44,7 @@ CHARACTERS_INSTRUCTION = (
     "Can you describe the main characters (only the adults) and prepare a prompt "
     "describing them with as much details as possible (use the descriptions from the "
     "book) so Nano Banana can generate images of them? Each prompt should be at least "
-    "50 words. Return at most 2 characters."
+    f"50 words. Return at most {MAX_CHARACTERS} characters."
 )
 
 # cell 35
@@ -63,7 +65,7 @@ CHAPTERS_INSTRUCTION = (
     "in it. It should be a single image, not a multi-tiled page. Be very descriptive, "
     "especially of the characters. Be very descriptive and remember to tell their name "
     "and to reuse the character prompts if they appear in the images. Also list all "
-    "characters who appear in it. Return at most 1 chapter."
+    f"characters who appear in it. Return at most {MAX_CHAPTERS} chapter."
 )
 
 # cell 38
