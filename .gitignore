@@ -8,3 +8,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .superpowers/
+
+# Agent worktrees: full checkouts carrying their own node_modules and .venv.
+.claude/worktrees/
+.worktrees/
