@@ -35,6 +35,51 @@ async def advance(client, pid, steps):
         await run(client, pid, step)
 
 
+def earlier_output_snapshot(project):
+    return {
+        "style_text": project["style_text"],
+        "characters": [
+            {
+                key: character[key]
+                for key in ("id", "position", "name", "prompt")
+            }
+            for character in project["characters"]
+        ],
+    }
+
+
+def state_snapshot(project):
+    return {
+        key: project[key]
+        for key in ("status", "current_step", "completed_steps")
+    }
+
+
+def raw_heads(settings, pid):
+    with db.get_conn(settings) as conn:
+        row = conn.execute(
+            "SELECT text_interaction_id, image_interaction_id "
+            "FROM projects WHERE id=?",
+            (pid,),
+        ).fetchone()
+    return row["text_interaction_id"], row["image_interaction_id"]
+
+
+def seed_raw_heads(settings, pid, *, text_head, image_head):
+    with db.get_conn(settings) as conn:
+        conn.execute(
+            "UPDATE projects SET text_interaction_id=?, image_interaction_id=? "
+            "WHERE id=?",
+            (text_head, image_head, pid),
+        )
+    assert raw_heads(settings, pid) == (text_head, image_head)
+
+
+async def yield_and_drain():
+    await asyncio.sleep(0)
+    await pipeline.drain_tasks()
+
+
 # --------------------------------------------------------------------------
 # A later step failing preserves everything before it
 # --------------------------------------------------------------------------
@@ -45,6 +90,9 @@ async def test_a_late_failure_leaves_every_earlier_output_intact(
 ):
     pid = await create(signed_in)
     await advance(signed_in, pid, ["STYLE", "CHARACTERS"])
+    before = (await signed_in.get(f"/api/projects/{pid}")).json()
+    earlier_outputs = earlier_output_snapshot(before)
+    earlier_state = state_snapshot(before)
     fake_gemini.fail_on(
         len(fake_gemini.calls), GeminiError("image service refused")
     )
@@ -53,27 +101,40 @@ async def test_a_late_failure_leaves_every_earlier_output_intact(
 
     project = (await signed_in.get(f"/api/projects/{pid}")).json()
     assert project["step_state"] == "FAILED"
-    assert project["status"] == "CHARACTERS_GENERATED"
-    assert project["style_text"]
-    assert len(project["characters"]) == 2
+    assert state_snapshot(project) == earlier_state
+    assert earlier_output_snapshot(project) == earlier_outputs
+    assert [character["image_state"] for character in project["characters"]] == [
+        "pending",
+        "pending",
+    ]
     assert project["failure"]["code"] == "GEMINI_ERROR"
 
 
 async def test_retrying_touches_only_the_failed_step(signed_in, fake_gemini):
     pid = await create(signed_in)
     await advance(signed_in, pid, ["STYLE", "CHARACTERS"])
+    before_failure = (await signed_in.get(f"/api/projects/{pid}")).json()
+    earlier_outputs = earlier_output_snapshot(before_failure)
+    earlier_state = state_snapshot(before_failure)
     fake_gemini.fail_on(len(fake_gemini.calls), GeminiError("boom"))
     await run(signed_in, pid, "PORTRAITS")
 
-    before = list(fake_gemini.calls)
+    failed = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert earlier_output_snapshot(failed) == earlier_outputs
+    assert state_snapshot(failed) == earlier_state
+
+    before_retry = len(fake_gemini.calls)
     await run(signed_in, pid, "PORTRAITS")
 
-    retried = fake_gemini.calls[len(before) :]
-    assert all(call.kind == "image" for call in retried)
-    assert not any(call.kind == "upload" for call in retried)
-    assert (
-        await signed_in.get(f"/api/projects/{pid}")
-    ).json()["status"] == "PORTRAITS_GENERATED"
+    retried = fake_gemini.calls[before_retry:]
+    assert [call.kind for call in retried] == ["image", "image", "image"]
+    after = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert earlier_output_snapshot(after) == earlier_outputs
+    assert [character["image_state"] for character in after["characters"]] == [
+        "ready",
+        "ready",
+    ]
+    assert after["status"] == "PORTRAITS_GENERATED"
 
 
 async def test_portrait_one_survives_a_portrait_two_failure(
@@ -96,10 +157,13 @@ async def test_portrait_one_survives_a_portrait_two_failure(
     await run(signed_in, pid, "PORTRAITS")
 
     retried = fake_gemini.calls[before:]
-    assert not any(first_prompt in (call.prompt or "") for call in retried)
-    assert len([call for call in retried if call.kind == "image"]) == 1
+    assert [call.kind for call in retried] == ["image"]
+    assert first_prompt not in (retried[0].prompt or "")
     after = (await signed_in.get(f"/api/projects/{pid}")).json()
-    assert all(character["image_state"] == "ready" for character in after["characters"])
+    assert [character["image_state"] for character in after["characters"]] == [
+        "ready",
+        "ready",
+    ]
     assert after["status"] == "PORTRAITS_GENERATED"
 
 
@@ -151,6 +215,9 @@ async def test_prior_outputs_survive_an_interruption_and_recovery(
 ):
     pid = await create(signed_in)
     await advance(signed_in, pid, ["STYLE", "CHARACTERS"])
+    before = (await signed_in.get(f"/api/projects/{pid}")).json()
+    earlier_outputs = earlier_output_snapshot(before)
+    earlier_state = state_snapshot(before)
     with db.get_conn(settings) as conn:
         conn.execute(
             "UPDATE projects SET step_state='RUNNING', server_run_id='old-process' "
@@ -158,10 +225,19 @@ async def test_prior_outputs_survive_an_interruption_and_recovery(
             (pid,),
         )
 
+    interrupted = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert interrupted["is_interrupted"] is True
+    assert earlier_output_snapshot(interrupted) == earlier_outputs
+    assert state_snapshot(interrupted) == earlier_state
+
     await run(signed_in, pid, "PORTRAITS")
 
     project = (await signed_in.get(f"/api/projects/{pid}")).json()
-    assert project["style_text"] and len(project["characters"]) == 2
+    assert earlier_output_snapshot(project) == earlier_outputs
+    assert [character["image_state"] for character in project["characters"]] == [
+        "ready",
+        "ready",
+    ]
     assert project["status"] == "PORTRAITS_GENERATED"
 
 
@@ -258,86 +334,149 @@ async def test_a_cancellation_arriving_after_takeover_writes_nothing(
 # --------------------------------------------------------------------------
 
 
-async def test_expiry_fails_with_one_attempt_and_nulls_the_head_that_raised(
-    signed_in, settings, fake_gemini
+@pytest.mark.parametrize(
+    ("step", "prerequisites", "text_head", "image_head", "expected_status"),
+    [
+        (
+            "CHARACTERS",
+            ["STYLE"],
+            "text-step-2-live",
+            "image-step-2-untouched",
+            "CHARACTERS_GENERATED",
+        ),
+        (
+            "CHAPTERS",
+            ["STYLE", "CHARACTERS", "PORTRAITS"],
+            "text-step-4-live",
+            "image-step-4-untouched",
+            "CHAPTERS_GENERATED",
+        ),
+    ],
+    ids=["step-2-characters", "step-4-chapters"],
+)
+async def test_text_expiry_clears_only_text_and_user_retry_rebuilds_with_book(
+    signed_in,
+    settings,
+    fake_gemini,
+    step,
+    prerequisites,
+    text_head,
+    image_head,
+    expected_status,
 ):
     pid = await create(signed_in)
-    await advance(signed_in, pid, ["STYLE"])
-    before = len(fake_gemini.calls)
-    fake_gemini.fail_on(before, InteractionNotFound("interaction expired"))
+    await advance(signed_in, pid, prerequisites)
+    seed_raw_heads(
+        settings,
+        pid,
+        text_head=text_head,
+        image_head=image_head,
+    )
+    before_failure = len(fake_gemini.calls)
+    fake_gemini.fail_on(
+        before_failure, InteractionNotFound("interaction expired")
+    )
 
-    await run(signed_in, pid, "CHARACTERS")
+    await run(signed_in, pid, step)
+    await yield_and_drain()
 
-    assert len(fake_gemini.calls) == before + 1
+    failed_calls = fake_gemini.calls[before_failure:]
+    assert len(failed_calls) == 1
+    assert [call.kind for call in failed_calls] == ["structured"]
+    assert failed_calls[0].previous_interaction_id == text_head
+    assert failed_calls[0].document_uri is None
     project = (await signed_in.get(f"/api/projects/{pid}")).json()
     assert project["step_state"] == "FAILED"
     assert project["failure"]["code"] == "GEMINI_ERROR"
     assert "expired" in project["failure"]["message"]
-    with db.get_conn(settings) as conn:
-        row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
-    assert row["text_interaction_id"] is None
-    assert row["style_text"] is not None
+    assert raw_heads(settings, pid) == (None, image_head)
+
+    before_retry = len(fake_gemini.calls)
+    await run(signed_in, pid, step)
+
+    retry_calls = fake_gemini.calls[before_retry:]
+    assert [call.kind for call in retry_calls] == ["upload", "structured"]
+    assert retry_calls[1].previous_interaction_id is None
+    assert retry_calls[1].document_uri == "files/fake-book.txt"
+    assert (await signed_in.get(f"/api/projects/{pid}")).json()[
+        "status"
+    ] == expected_status
 
 
-async def test_the_user_retry_rebuilds_from_minimum_persisted_state(
-    signed_in, settings, fake_gemini
+@pytest.mark.parametrize(
+    (
+        "step",
+        "prerequisites",
+        "text_head",
+        "image_head",
+        "retry_kinds",
+        "expected_status",
+    ),
+    [
+        (
+            "PORTRAITS",
+            ["STYLE", "CHARACTERS"],
+            "text-step-3-untouched",
+            "image-step-3-live",
+            ["image", "image", "image"],
+            "PORTRAITS_GENERATED",
+        ),
+        (
+            "ILLUSTRATIONS",
+            ["STYLE", "CHARACTERS", "PORTRAITS", "CHAPTERS"],
+            "text-step-5-untouched",
+            "image-step-5-live",
+            ["image"],
+            "DONE",
+        ),
+    ],
+    ids=["step-3-portraits", "step-5-illustrations"],
+)
+async def test_image_expiry_clears_only_image_and_user_retry_never_uploads_book(
+    signed_in,
+    settings,
+    fake_gemini,
+    step,
+    prerequisites,
+    text_head,
+    image_head,
+    retry_kinds,
+    expected_status,
 ):
     pid = await create(signed_in)
-    await advance(signed_in, pid, ["STYLE"])
-    fake_gemini.fail_on(
-        len(fake_gemini.calls), InteractionNotFound("expired")
-    )
-    await run(signed_in, pid, "CHARACTERS")
-
-    before = len(fake_gemini.calls)
-    await run(signed_in, pid, "CHARACTERS")
-
-    retried = fake_gemini.calls[before:]
-    assert [call.kind for call in retried] == ["upload", "structured"]
-    assert retried[1].previous_interaction_id is None
-    assert (
-        await signed_in.get(f"/api/projects/{pid}")
-    ).json()["status"] == "CHARACTERS_GENERATED"
-
-
-async def test_image_chain_expiry_nulls_only_the_image_head(
-    signed_in, settings, fake_gemini
-):
-    pid = await create(signed_in)
-    await advance(signed_in, pid, ["STYLE", "CHARACTERS"])
-    fake_gemini.fail_on(
-        len(fake_gemini.calls), InteractionNotFound("expired")
-    )
-
-    await run(signed_in, pid, "PORTRAITS")
-
-    with db.get_conn(settings) as conn:
-        row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
-    assert row["image_interaction_id"] is None
-    assert row["text_interaction_id"] is not None
-
-
-async def test_steps_three_and_five_never_re_upload_the_book_on_recovery(
-    signed_in, settings, fake_gemini
-):
-    pid = await create(signed_in)
-    await advance(
-        signed_in,
+    await advance(signed_in, pid, prerequisites)
+    seed_raw_heads(
+        settings,
         pid,
-        ["STYLE", "CHARACTERS", "PORTRAITS", "CHAPTERS"],
+        text_head=text_head,
+        image_head=image_head,
     )
-    with db.get_conn(settings) as conn:
-        conn.execute(
-            "UPDATE projects SET image_interaction_id = NULL WHERE id=?", (pid,)
-        )
+    before_failure = len(fake_gemini.calls)
+    fake_gemini.fail_on(
+        before_failure, InteractionNotFound("interaction expired")
+    )
 
-    before = len(fake_gemini.calls)
-    await run(signed_in, pid, "ILLUSTRATIONS")
+    await run(signed_in, pid, step)
+    await yield_and_drain()
 
-    assert not any(call.kind == "upload" for call in fake_gemini.calls[before:])
-    assert (
-        await signed_in.get(f"/api/projects/{pid}")
-    ).json()["status"] == "DONE"
+    failed_calls = fake_gemini.calls[before_failure:]
+    assert len(failed_calls) == 1
+    assert [call.kind for call in failed_calls] == ["image"]
+    assert failed_calls[0].previous_interaction_id == image_head
+    assert raw_heads(settings, pid) == (text_head, None)
+    project = (await signed_in.get(f"/api/projects/{pid}")).json()
+    assert project["step_state"] == "FAILED"
+    assert project["failure"]["code"] == "GEMINI_ERROR"
+
+    before_retry = len(fake_gemini.calls)
+    await run(signed_in, pid, step)
+
+    retry_calls = fake_gemini.calls[before_retry:]
+    assert [call.kind for call in retry_calls] == retry_kinds
+    assert all(call.kind != "upload" for call in retry_calls)
+    assert (await signed_in.get(f"/api/projects/{pid}")).json()[
+        "status"
+    ] == expected_status
 
 
 # --------------------------------------------------------------------------
@@ -361,10 +500,12 @@ async def test_a_provider_failure_is_attempted_once_and_never_looped(
 
 
 async def test_an_over_cap_response_surfaces_as_invalid_output(
-    signed_in, fake_gemini
+    signed_in, settings, fake_gemini
 ):
     pid = await create(signed_in)
     await advance(signed_in, pid, ["STYLE"])
+    text_head_before, _ = raw_heads(settings, pid)
+    assert text_head_before is not None
     fake_gemini.extra_items = 3
 
     await run(signed_in, pid, "CHARACTERS")
@@ -373,3 +514,10 @@ async def test_an_over_cap_response_surfaces_as_invalid_output(
     assert project["failure"]["code"] == "INVALID_OUTPUT"
     assert project["characters"] == []
     assert project["status"] == "STYLE_SET"
+    text_head_after, _ = raw_heads(settings, pid)
+    assert text_head_after == text_head_before
+    with db.get_conn(settings) as conn:
+        child_count = conn.execute(
+            "SELECT COUNT(*) FROM characters WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+    assert child_count == 0
