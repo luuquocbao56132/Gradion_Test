@@ -1,10 +1,12 @@
 # Gemini `interactions` contract — spike findings
 
-Spike run: 2026-08-14 (fix round 1 — see history for the aborted first run),
-`backend/spike_gemini.py` (deleted after this document was written), against the real
-Gemini API using the key in the worktree's `.env`. `google-genai` 2.18.1, models
-`gemini-3.1-flash-lite` (text) and `gemini-2.5-flash-image` (image) — both confirmed
-present via `client.models.list()`.
+Spike run: 2026-08-14 (fix round 2 — see history for the aborted first run and the
+fix-round-1 re-run), `backend/spike_gemini.py` (deleted after this document was
+written), against the real Gemini API using the key in the worktree's `.env`.
+`google-genai` 2.18.1, models `gemini-3.1-flash-lite` (text) and
+`gemini-2.5-flash-image` (image) — both confirmed present via `client.models.list()`.
+Q9's remaining gap (well-formed-but-nonexistent `previous_interaction_id`) was closed
+by a coordinator-run diagnostic against the same key, recorded below with the rest.
 
 **Headline: the `interactions` endpoint works.** The first run (superseded) aborted on
 its very first call and wrongly concluded the endpoint might be access-gated. It was
@@ -178,44 +180,121 @@ image model on the first attempt (no 403 seen for this probe in this run).
 
 ## Q9 — What exception type/message does an unknown `previous_interaction_id` raise?
 
-**Observed live — and it is NOT what the first run's static-analysis inference
-predicted.** Calling with `previous_interaction_id="interactions/does-not-exist"`
-(the brief's literal string) raised, on the first attempt (no 403, so no retry
-triggered):
+**Confirmed, both cases tested — and the answer is that the provider does not
+distinguish them.**
 
-`Q9 raises: google.genai._gaos.lib.compat_errors.BadRequestError`
-`Q9 message: Error code: 400 - {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}`
-`Q9 code attrs: None 400`
-`Q9 body: {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}`
+Real interaction ids observed in this spike are opaque `v1_...` tokens, e.g.
+`v1_Chc4Q1JfYXRQTkY4RG1vc1VQMmJ5TC1RNBIXOENSX2F0UE5GOERtb3NVUDJieUwtUTQ` — nothing like
+the brief's literal test string `"interactions/does-not-exist"`. A follow-up
+diagnostic took a real id of that shape, mutated its tail to produce a **well-formed
+but nonexistent** id (the case an actually-expired chain head would produce in
+production), and called with it. Result: **byte-identical to the malformed-string
+case.** Both raise:
 
-Facts confirmed directly from this exception object:
+`class       : google.genai._gaos.lib.compat_errors.BadRequestError`
+`status_code : 400`
+`.code attr  : <none>`
+`body        : {'error': {'message': 'Request contains an invalid argument.', 'code': 'invalid_request'}}`
+`error.code  : 'invalid_request'`
+
+(The malformed-string variant's raw transcript, from the second spike run, for
+reference: `Q9 raises: google.genai._gaos.lib.compat_errors.BadRequestError` /
+`Q9 message: Error code: 400 - {'error': {'message': 'Request contains an invalid
+argument.', 'code': 'invalid_request'}}` / `Q9 code attrs: None 400` / `Q9 body:
+{'error': {'message': 'Request contains an invalid argument.', 'code':
+'invalid_request'}}`.)
+
+Facts confirmed directly from these exception objects, for **either** a malformed or a
+well-formed-but-nonexistent `previous_interaction_id`:
 - **Class:** `BadRequestError`, **module:** `google.genai._gaos.lib.compat_errors`
 - **`.status_code`: `400`** (an int)
-- **`.code` attribute does not exist** — `getattr(exc, "code", None)` is `None`.
-  There is no `code` field on the exception itself.
+- **`.code` attribute does not exist on this hierarchy at all** —
+  `getattr(exc, "code", None)` is always `None`. This is not a quirk of this one call;
+  it kills any predicate shape that reads `exc.code`, including the one the plan
+  currently assumes for Task 34 (see the flagged warning below).
 - **`.body`** is a parsed dict: `{"error": {"message": "Request contains an invalid
   argument.", "code": "invalid_request"}}`. The provider's `code` string
   (`invalid_request`) lives inside `.body["error"]["code"]`, not as a top-level
   attribute.
 
-**Important caveat, stated plainly:** this is a `400 invalid_request`, not the `404
-NotFoundError` the first run's source-code inference predicted. The likely reason:
-real interaction IDs observed elsewhere in this same run look like
-`v1_Chd3Q05fYXNQSU44RG1vc1VQMmJ5TC1RNBIXd0NOX2FzUElOOERtb3NVUDJieUwtUTQ` — an opaque
-token in a specific format — while the brief's test string, `"interactions/does-not-exist"`,
-does not match that shape at all. The API appears to validate the *format* of
-`previous_interaction_id` before attempting a lookup, and rejects a malformed id with
-400 `invalid_request` rather than ever reaching "not found" logic. **This spike did not
-test a well-formed-but-nonexistent id** (e.g. a syntactically valid `v1_...` token that
-was never issued, or one that has genuinely expired) — that would require either
-minting a plausible-but-fake token of the right shape, or waiting for a real one to
-expire, neither of which this run attempted. The `_STATUS_MAP` in
-`compat_errors.py` (400→`BadRequestError`, 404→`NotFoundError`, confirmed accurate
-against this run's 400 and the prior run's 403) means a well-formed-but-missing id
-would plausibly still raise `NotFoundError` (404) rather than `BadRequestError` — but
-that is now flagged explicitly as **unverified inference**, not fact, precisely because
-this run proved the naive "just try a nonsense string" approach doesn't exercise that
-path.
+**The finding: the provider gives no way to distinguish an expired/nonexistent
+interaction from a malformed request.** Both a real-but-expired-shaped id and a
+garbage string produce the exact same `400 invalid_request`. There is no server-side
+signal — no distinct status code, no distinct `code` string, no distinguishing message
+— that separates "this id was never valid" from "this id used to be valid and no
+longer is." This is now a confirmed result, not an inference from source code.
+
+### The discriminator has to be ours, not the provider's
+
+Because the provider collapses both cases into the same error, `RealGeminiClient`
+cannot detect expiry from the exception alone. It must use context the client already
+has — whether the failing request carried a `previous_interaction_id` at all — as part
+of the predicate:
+
+```python
+status = getattr(exc, "status_code", None)
+body   = getattr(exc, "body", None)
+code   = body.get("error", {}).get("code") if isinstance(body, dict) else None
+if had_previous_interaction and (status == 404 or (status == 400 and code == "invalid_request")):
+    raise InteractionNotFound(...)
+```
+
+Two points make this correct:
+
+1. **`had_previous_interaction` gates the whole check.** The client only treats a `400
+   invalid_request` as an expiry when the failing request actually carried a
+   `previous_interaction_id`. A `400` on a call with no `previous_interaction_id`
+   cannot be an expired-chain-head error by definition — it's some other bad-request
+   condition — and stays a plain `GeminiError`. Without this gate, `400
+   invalid_request` is far too generic a signal to key off of alone (it's the same
+   error a genuinely malformed request of any kind would produce, as confirmed above).
+2. **The `404` branch is kept even though it was never observed.** `compat_errors.py`'s
+   `_STATUS_MAP` defines `NotFoundError` for status 404, and the provider may start
+   using it for this exact case in the future (either by changing behaviour, or simply
+   because a single confirmed sample of the well-formed-nonexistent case is not proof
+   no code path ever returns 404). Keeping the branch costs nothing and avoids silently
+   breaking `InteractionNotFound` detection if the provider's behaviour shifts.
+
+### Asymmetry — why the predicate leans toward detecting expiry
+
+A **false positive** (treating a non-expiry `400` as `InteractionNotFound` when it
+wasn't) is gated almost entirely away by the `had_previous_interaction` check above;
+in the residual case where it still happens, the cost is bounded and cheap — the
+recovery path re-uploads the book and starts a fresh chain, i.e. one extra book upload
+on a step-2/4 retry. A **false negative** (failing to recognise a real expiry, treating
+it as a generic `GeminiError` instead) is much worse: the user is stranded in a
+failure loop with `Retry` re-sending the same dead `previous_interaction_id` forever,
+with no path back to a working chain, because nothing ever triggers the
+reconstruction (re-upload-and-restart) logic that `InteractionNotFound` is meant to
+kick off. That asymmetry — cheap, self-correcting false positive vs. permanent,
+unrecoverable false negative — is why the predicate above is written to lean toward
+detecting expiry rather than toward precision.
+
+### Flagged warning for Task 34
+
+**The plan's current design for `_translate` keys on `code == 404`, and its test
+fixture constructs `google.genai.errors.ClientError(404, ...)`.** Both of those are
+wrong against what this spike actually observed:
+
+- `code == 404` doesn't exist as a checkable attribute — confirmed above, `.code` is
+  `None` on every exception in this hierarchy. The real signal is `.status_code`, and
+  even that was never observed to be `404` for this case — it was `400` both times
+  tested.
+- `google.genai.errors.ClientError` is a **different class entirely** from
+  `google.genai._gaos.lib.compat_errors.BadRequestError`, which is what the real
+  `client.aio.interactions.create()` call in this spike actually raised, twice,
+  confirmed live. A test fixture built from `google.genai.errors.ClientError(404, ...)`
+  would never construct an object `isinstance`-compatible with, or attribute-shaped
+  like, what production actually throws.
+
+**Net effect if this ships as currently planned: `InteractionNotFound` would never
+fire against the real API, while a test suite built around the wrong fixture class and
+the wrong status code would keep passing anyway** — a false-green test suite backing a
+recovery path that silently doesn't work. Task 34 must use the predicate given above
+(`status_code`/`body["error"]["code"]`/`had_previous_interaction`, not `.code`) and
+build its test fixture from `google.genai._gaos.lib.compat_errors.BadRequestError` (and
+ideally `NotFoundError` too, for the unexercised-but-kept 404 branch), not
+`google.genai.errors.ClientError`.
 
 ## Decisions
 
@@ -248,24 +327,23 @@ path.
   `{"type": "image", "data": <base64>, "mime_type": ...}` content parts plus a
   top-level `system_instruction` string, no `previous_interaction_id` required. This is
   the shape Step 5's recovery path (redraw-from-reference) should use.
-- **`InteractionNotFound` detection (Q9):** for a **malformed** `previous_interaction_id`
-  (wrong shape, e.g. not the opaque `v1_...` token format the API issues), expect
+- **`InteractionNotFound` detection (Q9):** confirmed for both a **malformed**
+  `previous_interaction_id` and a **well-formed-but-nonexistent** one (a real `v1_...`
+  id with a mutated tail) — both raise byte-identical
   `google.genai._gaos.lib.compat_errors.BadRequestError`
   (module `google.genai._gaos.lib.compat_errors`), `.status_code == 400`, no `.code`
-  attribute (always `None` — do not gate on it), `.body ==
-  {"error": {"message": "Request contains an invalid argument.", "code":
-  "invalid_request"}}`. **This spike could not exercise the well-formed-but-nonexistent
-  case** (a syntactically valid token that was never issued or has expired) — for that
-  case, fall back to the source-confirmed dispatch table in `compat_errors.py`
-  (`_STATUS_MAP`) and expect `NotFoundError`, `.status_code == 404`, same "no `.code`
-  attribute, `.body` is the parsed error dict" shape, **but treat that specific
-  prediction as unverified** until confirmed against a real expired-interaction call.
-  A defensible `RealGeminiClient` predicate for `InteractionNotFound` that covers both
-  observed and predicted cases:
-  `getattr(exc, "status_code", None) in (400, 404)` combined with a body-content check
-  (`exc.body.get("error", {}).get("code") in ("invalid_request", "not_found")`) rather
-  than relying on exception class alone, since the 400 case is now confirmed real and
-  the 404 case is still only inferred.
+  attribute (always `None` — do not gate on it, and do not use
+  `google.genai.errors.ClientError` as the fixture class, see the Q9 flagged warning),
+  `.body == {"error": {"message": "Request contains an invalid argument.", "code":
+  "invalid_request"}}`. **The provider gives no way to distinguish an expired
+  interaction from a malformed request** — this is a confirmed finding, not an
+  inference. Because of that, the client must supply the missing discriminator itself:
+  only treat a `400 invalid_request` as `InteractionNotFound` when the failing request
+  actually carried a `previous_interaction_id`; keep a `404`/`NotFoundError` branch
+  too, even though never observed, since `compat_errors.py`'s `_STATUS_MAP` defines it
+  and the provider may use it later. See the Q9 section above for the exact predicate,
+  the two correctness points, and the false-positive/false-negative asymmetry that
+  motivates leaning toward detecting expiry.
 - **Intermittent 403 (new, cross-cutting):** `PermissionDeniedError` (403,
   `permission_denied`) is a transient provider flake on the `interactions` endpoint,
   observed at 36.4% (4/11) in this run across text and document-input calls,
