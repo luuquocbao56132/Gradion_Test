@@ -98,6 +98,15 @@ assessment's §5.5 invitation: skipped, deliberately.
   path that re-uploads the book).
 - **No `fsync`.** A power loss can lose the last moments of writes; ordinary
   process crashes are already covered by SQLite's WAL.
+- **The provider is intermittently uncooperative, and that is visible.** Two
+  behaviours were measured against a real key during UAT and are not defects in
+  this app: file-backed calls return `403 permission_denied` on roughly 30% of
+  attempts, and the image model sometimes answers an illustration request in
+  prose instead of drawing. Both surface as a failed step with a clear message,
+  with every earlier result preserved, and clear on **Retry**. Nothing is
+  retried automatically — §4.3 forbids retry loops, so the retry is yours to
+  make. Expect to click Retry occasionally on the image steps. `TESTING.md`
+  records the measurements.
 
 ## Two deliberate divergences from `app-demo.html`
 

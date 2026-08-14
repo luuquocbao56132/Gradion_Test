@@ -230,4 +230,19 @@ are not claimed:
 - `prefers-reduced-motion` with the OS setting enabled
 - Watching portraits appear one at a time in the UI during a live run
 
-Steps to perform them are in `README.md`.
+To perform them:
+
+1. Set `USE_FAKE_GEMINI=1` in `.env` (instant steps, no quota), then `./start.sh`
+   and open <http://localhost:5173>.
+2. Sign in, create a project by pasting text **and** again with a `.txt` file, and
+   run all five steps. Watch the two portrait cards: the first should flip to
+   *generating* while the second stays *pending*, then swap — with no page jump as
+   each image lands.
+3. Resize to 380px wide. Check nothing scrolls horizontally and the stepper labels
+   collapse rather than overflow.
+4. Tab through every screen without touching the mouse. Confirm a visible focus
+   ring on each control and that the whole flow is operable from the keyboard.
+5. Enable the OS "reduce motion" setting and reload. The spinner should stop
+   animating while the caption still names the running step.
+6. Set `USE_FAKE_GEMINI=0` and repeat step 2 once against the real provider to see
+   genuine artwork, allowing for the retries described above.
