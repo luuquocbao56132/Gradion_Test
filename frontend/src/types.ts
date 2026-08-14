@@ -24,6 +24,8 @@ export type ImageState = 'ready' | 'generating' | 'pending';
 
 export type FailureCode = 'GEMINI_ERROR' | 'INVALID_OUTPUT' | 'INTERNAL';
 
+export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'closed';
+
 export interface SessionView {
   user_id: string;
   name: string;
